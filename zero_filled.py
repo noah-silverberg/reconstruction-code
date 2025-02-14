@@ -51,15 +51,9 @@ def reconstruct_frame(
         measured_line = mdb.cLin
         # Map the measured line into the full k-space.
         full_line = measured_line + phase_offset  # e.g. measured 0->12, measured 39->51
-        # If a line is already filled (e.g. if there are multiple entries for the same line), average them.
+        # If a line is already filled (e.g. if there are multiple entries for the same line), raise an error.
         if np.any(kspace_full[full_line]):
-            # TODO: why would there be multiple entries for the same line?
-            # TODO: and if so, why average them?
-            # TODO: and what if there are more than 2 entries? Then this does not yield the correct average.
-            kspace_full[
-                full_line
-            ] += data_cropped.T  # transpose to get (readout, channels)
-            kspace_full[full_line] /= 2.0
+            raise ValueError(f"Duplicate data for line {full_line}")
         else:
             kspace_full[full_line] = data_cropped.T
 
@@ -69,8 +63,6 @@ def reconstruct_frame(
     for ch in range(n_channels):
         # Get k-space for this channel.
         k_ch = kspace_full[:, :, ch]
-        # NOTE: We don't need to ifftshift the data here since it just introduces a phase shift after ifft2
-        #       but we only care about the magnitude of the image.
         # 2D inverse FFT
         img_ch = np.fft.ifft2(k_ch)
         # fftshift the result to get the image in the right order.

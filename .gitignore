@@ -1,2 +1,7 @@
 *.gif
 *.dat
+*.txt
+*.jpg
+*.png
+*.pdf
+*.DS_Store
