@@ -10,10 +10,11 @@ def reconstruct_frame(
     mdb_list,
     full_phase=128,
     full_readout=200,
-    crop_lower=64,
-    crop_upper=192,
+    crop_lower=8,
+    crop_upper=136,
     full_target_readout=128,
     phase_offset=32,
+    return_kspace=False,
 ):
     """
     Reconstruct one frame from a list of mdb blocks and fill in missing k-space
@@ -29,9 +30,11 @@ def reconstruct_frame(
       full_target_readout : final readout dimension after cropping (128)
       phase_offset : offset to place measured phase lines (e.g. measured line + 12)
       threshold : below this value a k-space point is considered missing
+      return_kspace : if True, also return the combined k-space magnitude
 
     Returns:
       img : reconstructed 2D magnitude image (normalized)
+      [kspace] : (optional) combined k-space magnitude (root-sum-of-squares over channels)
     """
     # 1) Insert acquired data into a full k-space array
     sample_data = np.array(mdb_list[0].data)
@@ -51,37 +54,35 @@ def reconstruct_frame(
         else:
             kspace_full[full_line] = data_cropped.T
 
-    # 2) Shift k-space so that the DC component is centered.
-    kspace_shifted = np.fft.fftshift(kspace_full, axes=(0, 1))
     Np, Nx = full_phase, full_target_readout
 
-    # 3) Compute the shifted indices of the acquired rows.
-    acquired_indices = [(mdb.cLin + phase_offset + Np // 2) % Np for mdb in mdb_list]
+    # 2) Compute the indices of the acquired rows.
+    acquired_indices = [(mdb.cLin + phase_offset) % Np for mdb in mdb_list]
 
-    # 4) Fill missing k-space points ONLY outside the acquired region.
+    # 3) Fill missing k-space points ONLY outside the acquired region.
     for ch in range(n_channels):
         for i in range(Np):
             if i in acquired_indices:
                 continue  # This row was acquired – leave it untouched.
             for j in range(Nx):
                 # Fill using the conjugate symmetric point.
-                kspace_shifted[i, j, ch] = np.conjugate(kspace_shifted[-i, -j, ch])
+                kspace_full[i, j, ch] = np.conjugate(kspace_full[-i, -j, ch])
 
-    # 5) Inverse shift to restore original k-space ordering.
-    kspace_filled = np.fft.ifftshift(kspace_shifted, axes=(0, 1))
-
-    # 6) For each channel, perform the 2D inverse FFT.
+    # 4) For each channel, perform the 2D inverse FFT.
     imgs = []
     for ch in range(n_channels):
-        k_ch = kspace_filled[:, :, ch]
-        k_ch_shifted = np.fft.ifftshift(k_ch)
-        img_ch = np.fft.ifft2(k_ch_shifted)
+        k_ch = kspace_full[:, :, ch]
+        img_ch = np.fft.ifft2(k_ch)
         img_ch = np.fft.fftshift(img_ch)
         imgs.append(img_ch)
 
-    # 7) Combine channels using root-sum-of-squares.
+    # 5) Combine channels using root-sum-of-squares.
     img_combined = np.sqrt(np.sum(np.abs(np.array(imgs)) ** 2, axis=0))
     img_combined = img_combined / np.max(img_combined)
+
+    if return_kspace:
+        kspace_combined = np.sqrt(np.sum(np.abs(kspace_full) ** 2, axis=2))
+        return img_combined, kspace_combined
     return img_combined
 
 
@@ -106,19 +107,36 @@ def main():
     print("Reconstructing frames for frame numbers:", frame_numbers)
 
     recon_frames = []
+    kspace_frames = []
     for rep in frame_numbers:
         mdb_list = frames_dict[rep]
-        img = reconstruct_frame(mdb_list)
+        img, ksp = reconstruct_frame(mdb_list, return_kspace=True)
         recon_frames.append(img)
+        kspace_frames.append(ksp)
 
-    gif_frames = []
-    for img in recon_frames:
-        img_uint8 = (img * 255).astype(np.uint8)
-        gif_frames.append(img_uint8)
+    gif_frames = [(img * 255).astype(np.uint8) for img in recon_frames]
+    imageio.mimsave("conjugate_symmetry_cine.gif", gif_frames, duration=0.125)
+    print("Saved reconstructed cine as conjugate_symmetry_cine.gif")
 
-    output_gif = "cine_conjugate_symmetry.gif"
-    imageio.mimsave(output_gif, gif_frames, duration=0.125)
-    print(f"Saved reconstructed cine as {output_gif}")
+    # Create k-space GIF with center grid lines.
+    kspace_gif = []
+    for ksp in kspace_frames:
+        # Log-scale for better dynamic range.
+        disp = np.log(1 + np.abs(ksp))
+        disp = (disp - disp.min()) / (disp.max() - disp.min())
+        disp_uint8 = (disp * 255).astype(np.uint8)
+        # Convert to RGB.
+        disp_rgb = np.stack([disp_uint8] * 3, axis=-1)
+        h, w, _ = disp_rgb.shape
+        cx, cy = w // 2, h // 2
+        # Draw vertical center line.
+        disp_rgb[:, cx, :] = [255, 0, 0]
+        # Draw horizontal center line.
+        disp_rgb[cy, :, :] = [255, 0, 0]
+        kspace_gif.append(disp_rgb)
+
+    imageio.mimsave("conjugate_symmetry_kspace.gif", kspace_gif, duration=0.125)
+    print("Saved filled k-space GIF as conjugate_symmetry_kspace.gif")
 
 
 if __name__ == "__main__":
