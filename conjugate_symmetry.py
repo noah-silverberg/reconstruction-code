@@ -13,7 +13,7 @@ def reconstruct_frame(
     crop_lower=64,
     crop_upper=192,
     full_target_readout=128,
-    phase_offset=12,
+    phase_offset=32,
 ):
     """
     Reconstruct one frame from a list of mdb blocks and fill in missing k-space
@@ -55,18 +55,16 @@ def reconstruct_frame(
     kspace_shifted = np.fft.fftshift(kspace_full, axes=(0, 1))
     Np, Nx = full_phase, full_target_readout
 
-    # 3) Automatically compute the acquired region in shifted coordinates.
-    #    The unshifted acquired region is from phase_offset to phase_offset + acquired_lines - 1.
-    acquired_lines = len(mdb_list)
-    acq_start = (phase_offset + Np // 2) % Np
-    acq_end = (phase_offset + acquired_lines - 1 + Np // 2) % Np
+    # 3) Compute the shifted indices of the acquired rows.
+    acquired_indices = [(mdb.cLin + phase_offset + Np // 2) % Np for mdb in mdb_list]
 
     # 4) Fill missing k-space points ONLY outside the acquired region.
     for ch in range(n_channels):
         for i in range(Np):
-            if acq_start <= i <= acq_end:
-                continue  # Skip rows in the acquired region.
+            if i in acquired_indices:
+                continue  # This row was acquired – leave it untouched.
             for j in range(Nx):
+                # Fill using the conjugate symmetric point.
                 kspace_shifted[i, j, ch] = np.conjugate(kspace_shifted[-i, -j, ch])
 
     # 5) Inverse shift to restore original k-space ordering.
