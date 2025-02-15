@@ -10,10 +10,11 @@ def reconstruct_frame(
     mdb_list,
     full_phase=128,
     full_readout=200,
-    crop_lower=64,
-    crop_upper=192,
+    crop_lower=8,
+    crop_upper=136,
     full_target_readout=128,
-    phase_offset=12,
+    phase_offset=32,
+    return_kspace=False,
 ):
     """
     Reconstruct one frame from a list of mdb blocks.
@@ -25,9 +26,11 @@ def reconstruct_frame(
       crop_lower, crop_upper : indices to crop raw readout data to remove oversampling (yielding 128 samples)
       full_target_readout : final readout size after cropping (128)
       phase_offset : offset to embed measured phase lines into full k-space (e.g. measured index + 12)
+      return_kspace : if True, also return the combined k-space magnitude
 
     Returns:
       img : reconstructed 2D image (magnitude, normalized)
+      [kspace] : (optional) combined k-space magnitude (root-sum-of-squares over channels)
     """
     # We know each mdb.data is (channels, full_readout)
     # Determine number of channels from first mdb block
@@ -73,6 +76,10 @@ def reconstruct_frame(
 
     # Normalize the image for display
     img_combined = img_combined / np.max(img_combined)
+
+    if return_kspace:
+        kspace_combined = np.sqrt(np.sum(np.abs(kspace_full) ** 2, axis=2))
+        return img_combined, kspace_combined
     return img_combined
 
 
@@ -103,25 +110,36 @@ def main():
     # List to hold reconstructed image frames
     recon_frames = []
 
+    kspace_frames = []
     # Loop over each frame and reconstruct the image
     for rep in frame_numbers:
         mdb_list = frames_dict[rep]
-        img = reconstruct_frame(mdb_list)
+        img, ksp = reconstruct_frame(mdb_list, return_kspace=True)
         recon_frames.append(img)
+        kspace_frames.append(ksp)
 
-    # Create a GIF from the reconstructed frames.
-    # First, convert each frame to an 8-bit grayscale image.
-    gif_frames = []
-    for img in recon_frames:
-        # Scale to 0-255 and convert to uint8
-        img_uint8 = (img * 255).astype(np.uint8)
-        # Optionally, use a colormap for visualization; here we keep grayscale.
-        gif_frames.append(img_uint8)
+    gif_frames = [(img * 255).astype(np.uint8) for img in recon_frames]
+    imageio.mimsave("zero_filled_cine.gif", gif_frames, duration=0.125)
+    print("Saved reconstructed cine as zero_filled_cine.gif")
 
-    output_gif = "cine_recon.gif"
-    # Save GIF using imageio (duration between frames in seconds)
-    imageio.mimsave(output_gif, gif_frames, duration=0.125)
-    print(f"Saved reconstructed cine as {output_gif}")
+    # Create k-space GIF with center grid lines.
+    kspace_gif = []
+    for ksp in kspace_frames:
+        # Log-scale for better dynamic range.
+        disp = np.log(1 + np.abs(ksp))
+        disp = (disp - disp.min()) / (disp.max() - disp.min())
+        disp_uint8 = (disp * 255).astype(np.uint8)
+        # Convert to RGB.
+        disp_rgb = np.stack([disp_uint8] * 3, axis=-1)
+        h, w, _ = disp_rgb.shape
+        cx, cy = w // 2, h // 2
+        # Draw vertical center line.
+        disp_rgb[:, cx, :] = [255, 0, 0]
+        # Draw horizontal center line.
+        disp_rgb[cy, :, :] = [255, 0, 0]
+        kspace_gif.append(disp_rgb)
+    imageio.mimsave("zero_filled_kspace.gif", kspace_gif, duration=0.125)
+    print("Saved filled k-space GIF as zero_filled_kspace.gif")
 
 
 if __name__ == "__main__":
