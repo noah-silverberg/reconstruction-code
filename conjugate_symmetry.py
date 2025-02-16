@@ -29,7 +29,6 @@ def reconstruct_frame(
       crop_lower, crop_upper : indices to crop raw readout (to 128 samples)
       full_target_readout : final readout dimension after cropping (128)
       phase_offset : offset to place measured phase lines (e.g. measured line + 12)
-      threshold : below this value a k-space point is considered missing
       return_kspace : if True, also return the combined k-space magnitude
 
     Returns:
@@ -49,8 +48,7 @@ def reconstruct_frame(
         measured_line = mdb.cLin
         full_line = measured_line + phase_offset  # maps measured line into full k-space
         if np.any(kspace_full[full_line]):
-            kspace_full[full_line] += data_cropped.T  # transpose to (readout, channels)
-            kspace_full[full_line] /= 2.0
+            raise ValueError(f"Duplicate data for line {full_line}")
         else:
             kspace_full[full_line] = data_cropped.T
 

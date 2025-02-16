@@ -62,27 +62,17 @@ def homodyne_reconstruct_frame(
         k_ch = kspace_full[:, :, ch]
 
         # Automatically calculate symmetric region lines:
-        symmetric_region_lines = (acquired_lines - phase_offset) * 2
-        non_sym_count = acquired_lines - symmetric_region_lines
-
-        # Adjustable: the number of non-symmetric lines that get full 2 weighting.
-        full2_start = non_sym_count // 2
+        sym_count = (acquired_lines - phase_offset) * 2
+        non_sym_count = acquired_lines - sym_count
 
         # Initialize the 1D weight vector for the acquired data.
         w = np.empty(acquired_lines, dtype=np.float32)
 
-        # For the top (non-symmetric) region:
-        # Upper half gets full 2 weighting.
-        w[:full2_start] = 2.0
-        # Lower half ramps linearly from 2 down to 1.
-        if non_sym_count - full2_start > 0:
-            ramp = np.linspace(
-                2.0, 1.0, non_sym_count - full2_start + 2, endpoint=True
-            )[1:-1]
-            w[full2_start:non_sym_count] = ramp
-
-        # For the symmetric region (bottom part), set weighting to 1.
-        w[non_sym_count:] = 1.0
+        # The top (non-symmetric) region gets full 2 weighting.
+        w[:non_sym_count] = 2.0
+        # Symmetric region linearly from 2 down to 1.
+        ramp = np.linspace(2.0, 0.0, sym_count + 2)[1:-1]
+        w[non_sym_count:] = ramp
 
         # Replicate this 1D vector along the readout dimension.
         weight_matrix = np.tile(w[:, None], (1, full_target_readout))
