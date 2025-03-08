@@ -1,11 +1,15 @@
 import utils
 import ecg
+import cardiac_binning
 import numpy as np
 import matplotlib.pyplot as plt
 import neurokit2 as nk
 
 data_path = "meas_MID00086_FID26450_DMI_PMU_250216_100rep.dat"
 fs = 1 / 5.5e-3  # 1 / TR (sampling frequency used to detect R-peaks)
+num_bins = 30  # Number of bins for binning
+n_phase_encodes_per_frame = 112
+extended_pe_lines = 128
 
 ########################################################
 
@@ -32,4 +36,27 @@ if img.shape[0] != ecg_data.shape[0]:
 r_peaks_list = ecg.detect_r_peaks(ecg_data, fs)
 
 # Plot ECG signals with detected R-peaks
-ecg.plot_ecg(ecg_data, fs, r_peaks_list, mode="separate")
+# (Just to ensure that the R-peaks are detected correctly)
+# ecg.plot_ecg(ecg_data, fs, r_peaks_list, mode="separate")
+
+
+########################################################
+
+# Perform the cardiac-phase binning.
+binned_data = cardiac_binning.bin_kspace_by_cardiac_phase(
+    r_peaks_list, img, num_bins=30, n_phase_encodes_per_frame=112, extended_pe_lines=128
+)
+print("Binned k-space shape:", binned_data.shape)
+
+# Reconstruct images using sum-of-squares.
+recon_images = cardiac_binning.reconstruct_image_from_binned_kspace(binned_data)
+print("Reconstructed images shape:", recon_images.shape)
+
+# Save the reconstructed images as a GIF.
+utils.save_images_as_gif(recon_images, "reconstructed_images.gif", duration=0.2)
+
+# Optionally display the reconstructed images as an animated GIF.
+utils.display_images_as_gif(recon_images, interval=200)
+
+# Save the binned k-space as a GIF.
+utils.save_kspace_as_gif(binned_data, "kspace.gif", duration=0.2)
