@@ -25,6 +25,10 @@ def bin_kspace_by_cardiac_phase(
       binned_data : np.ndarray
           Binned k-space data of shape (num_bins, extended_pe_lines, coils, frequency_encodes).
           If multiple acquisitions fall into the same bin for the same phase-encode row, the data are averaged.
+
+      binned_count : np.ndarray
+          A 2D numpy array of shape (num_bins, extended_pe_lines) that indicates the number of acquisitions
+          for each phase encode row.
     """
     # 1. Average the R-peak indices across channels.
     # Each element of r_peaks_list is assumed to be a 1D numpy array.
@@ -78,7 +82,95 @@ def bin_kspace_by_cardiac_phase(
             if binned_count[b, r] > 0:
                 binned_data[b, r] = binned_sum[b, r] / binned_count[b, r]
 
-    return binned_data
+    return binned_data, binned_count
+
+
+def homodyne_binned_data(binned_data, binned_count):
+    """
+    Apply homodyne correction to binned k-space data without enforcing continuity,
+    and return the reconstructed images.
+
+    Instead of enforcing that the acquired region is contiguous, this function
+    assigns a weight of 1 to every acquired phase-encode row that has its symmetric
+    counterpart also measured, and a weight of 2 to rows without a measured counterpart.
+    For each bin, the function:
+      1. Applies the weight to the acquired rows.
+      2. Reconstructs a low-resolution image from the acquired data (using a lowpass filter)
+         to estimate the phase.
+      3. Corrects the phase of the full weighted image.
+      4. Reconstructs the corrected image for each coil.
+      5. Combines the coil images via root-sum-of-squares and returns the final real image.
+
+    Parameters:
+      binned_data : np.ndarray
+          Complex k-space data of shape
+          (num_bins, extended_pe_lines, n_coils, frequency_encodes).
+      binned_count : np.ndarray
+          2D array of shape (num_bins, extended_pe_lines) indicating, for each phase-encode
+          row in each bin, how many acquisitions contributed.
+
+    Returns:
+      recon_images : np.ndarray
+          Reconstructed images of shape (num_bins, image_height, image_width) obtained by
+          taking the real part of the homodyne-corrected images and combining channels via
+          root-sum-of-squares.
+    """
+    num_bins, n_phase, n_coils, n_readout = binned_data.shape
+    recon_images = []
+
+    # Define the center of k-space (phase dimension) to compute symmetry.
+    center = n_phase / 2.0  # may be fractional
+
+    for b in range(num_bins):
+        # Determine the weight for each phase-encode row in this bin.
+        # For each acquired row (binned_count > 0):
+        #   - If its symmetric counterpart is also acquired, weight = 1.
+        #   - Otherwise, weight = 2.
+        w = np.zeros(n_phase, dtype=np.float32)
+        for r in range(n_phase):
+            if binned_count[b, r] > 0:
+                # Compute symmetric index: r_sym = round(2*center - r)
+                r_sym = int(round(2 * center - r))
+                if 0 <= r_sym < n_phase and binned_count[b, r_sym] > 0:
+                    w[r] = 1.0
+                else:
+                    w[r] = 2.0
+        # Create weight matrix along the readout dimension.
+        weight_matrix = np.tile(w[:, None], (1, n_readout))
+
+        # Process each coil for the current bin.
+        coil_imgs = []
+        for ch in range(n_coils):
+            k_ch = binned_data[b, :, ch, :]  # shape: (n_phase, n_readout)
+
+            # Apply the weight to the k-space data.
+            k_weighted = k_ch * weight_matrix
+
+            # Construct a simple lowpass filter that selects acquired rows.
+            lowpass_filter = (binned_count[b, :] > 0).astype(np.float32)
+            lowpass_matrix = np.tile(lowpass_filter[:, None], (1, n_readout))
+            k_lowpass = k_ch * lowpass_matrix
+
+            # Reconstruct images from weighted and lowpass data.
+            img_full = np.fft.fftshift(np.fft.ifft2(k_weighted))
+            img_lowres = np.fft.fftshift(np.fft.ifft2(k_lowpass))
+
+            # Estimate the phase from the low-resolution image.
+            phase_est = np.angle(img_lowres)
+
+            # Correct the full image phase.
+            img_corrected = img_full * np.exp(-1j * phase_est)
+
+            # Take the real part as the final corrected image for this coil.
+            img_real = np.real(img_corrected)
+            coil_imgs.append(img_real)
+
+        # Combine the coil images using root-sum-of-squares.
+        coil_imgs = np.array(coil_imgs)  # shape: (n_coils, image_height, image_width)
+        sos_img = np.sqrt(np.sum(coil_imgs**2, axis=0))
+        recon_images.append(sos_img)
+
+    return np.array(recon_images)
 
 
 def reconstruct_image_from_binned_kspace(binned_data):
