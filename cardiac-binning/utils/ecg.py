@@ -26,7 +26,30 @@ def detect_r_peaks(ecg_data, fs):
     return r_peaks_list
 
 
-def plot_ecg(ecg_data, fs, r_peaks_list, mode="separate", channel_labels=None):
+# def detect_rsp_peaks(rsp_data, fs):
+#     """
+#     Detect respiratory peaks for multi-channel respiratory data.
+
+#     Parameters:
+#       rsp_data (np.ndarray): 2D array of shape (n_samples, n_channels)
+#       fs (float): Sampling frequency.
+
+#     Returns:
+#       list of np.ndarray: A list where each element is an array of detected respiratory peak indices for a channel.
+#     """
+#     # Ensure rsp_data is 2D.
+#     if rsp_data.ndim == 1:
+#         rsp_data = rsp_data.reshape(-1, 1)
+
+#     rsp_peaks_list = []
+#     for channel in rsp_data.T:
+#         processed, info = nk.rsp_process(channel, sampling_rate=fs)
+#         rsp_peaks = info["RSP_Peaks"]
+#         rsp_peaks_list.append(np.array(rsp_peaks))
+#     return rsp_peaks_list
+
+
+def plot_ecg(ecg_data, fs, r_peaks_list=None, mode="separate", channel_labels=None):
     """
     Plot multi-channel ECG data with detected R-peaks.
 
@@ -35,7 +58,7 @@ def plot_ecg(ecg_data, fs, r_peaks_list, mode="separate", channel_labels=None):
     Parameters:
       ecg_data (np.ndarray): 2D array of shape (n_samples, n_channels).
       fs (float): Sampling frequency.
-      r_peaks_list (list of np.ndarray): List of R-peak indices for each channel.
+      r_peaks_list (list of np.ndarray, optional): List of R-peak indices for each channel.
       mode (str): "separate" to plot each channel in its own subplot,
                   "together" to overlay all channels in one plot.
       channel_labels (list of str, optional): Labels for each channel. Defaults to "Channel 1", "Channel 2", etc.
@@ -51,9 +74,13 @@ def plot_ecg(ecg_data, fs, r_peaks_list, mode="separate", channel_labels=None):
         for i in range(n_channels):
             plt.subplot(n_channels, 1, i + 1)
             plt.plot(t, ecg_data[:, i], label=channel_labels[i])
-            plt.plot(
-                t[r_peaks_list[i]], ecg_data[r_peaks_list[i], i], "ro", label="R-peaks"
-            )
+            if r_peaks_list is not None:
+                plt.plot(
+                    t[r_peaks_list[i]],
+                    ecg_data[r_peaks_list[i], i],
+                    "ro",
+                    label="R-peaks",
+                )
             plt.xlabel("Time (s)")
             plt.ylabel("Amplitude")
             plt.title(channel_labels[i])
@@ -63,12 +90,13 @@ def plot_ecg(ecg_data, fs, r_peaks_list, mode="separate", channel_labels=None):
         plt.figure(figsize=(12, 6))
         for i in range(n_channels):
             plt.plot(t, ecg_data[:, i], label=channel_labels[i])
-            plt.plot(
-                t[r_peaks_list[i]],
-                ecg_data[r_peaks_list[i], i],
-                "o",
-                label=f"{channel_labels[i]} R-peaks",
-            )
+            if r_peaks_list is not None:
+                plt.plot(
+                    t[r_peaks_list[i]],
+                    ecg_data[r_peaks_list[i], i],
+                    "o",
+                    label=f"{channel_labels[i]} R-peaks",
+                )
         plt.xlabel("Time (s)")
         plt.ylabel("Amplitude")
         plt.title("ECG Channels")
