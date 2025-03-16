@@ -14,14 +14,14 @@ from IPython.display import HTML
 import pydicom
 
 
-def save_images_as_gif(images, filename, duration=0.2, cmap="gray"):
+def save_images_as_gif(images, filename, duration=200, cmap="gray"):
     """
     Save a sequence of images as an animated GIF.
 
     Parameters:
         images (np.ndarray): (num_frames, height, width)
         filename (str): Output filename.
-        duration (float): Time between frames (seconds).
+        duration (float): Time between frames (ms).
         cmap (str): Color map (if needed).
     """
     frames = []
@@ -112,14 +112,14 @@ def display_kspace_as_gif(kspace, duration=0.2, cmap="gray"):
     return HTML(anim.to_jshtml())
 
 
-def save_kspace_as_gif(kspace, filename, duration=0.2, cmap="gray"):
+def save_kspace_as_gif(kspace, filename, duration=200, cmap="gray"):
     """
     Save cine k-space data as a GIF with overlaid center lines.
 
     Parameters:
         kspace (np.ndarray): (num_frames, n_rows, coils, readout)
         filename (str): Output filename.
-        duration (float): Frame duration (seconds).
+        duration (float): Frame duration (ms).
         cmap (str): Color map.
     """
     num_frames, n_rows, n_coils, n_readout = kspace.shape
