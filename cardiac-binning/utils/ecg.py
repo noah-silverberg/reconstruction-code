@@ -1,5 +1,12 @@
-import neurokit2 as nk
+"""
+ecg.py
+
+This module provides functions for ECG signal processing, including R-peak detection,
+heart rate computation, and plotting.
+"""
+
 import numpy as np
+import neurokit2 as nk
 import matplotlib.pyplot as plt
 
 
@@ -8,84 +15,55 @@ def detect_r_peaks(ecg_data, fs):
     Detect R-peaks for multi-channel ECG data.
 
     Parameters:
-      ecg_data (np.ndarray): 2D array of shape (n_samples, n_channels)
-      fs (float): Sampling frequency.
+        ecg_data (np.ndarray): 2D array (n_samples x n_channels).
+        fs (float): Sampling frequency.
 
     Returns:
-      list of np.ndarray: A list where each element is an array of detected R-peak indices for a channel.
+        list: List of numpy arrays with detected R-peak indices for each channel.
     """
-    # Ensure ecg_data is 2D.
     if ecg_data.ndim == 1:
         ecg_data = ecg_data.reshape(-1, 1)
-
     r_peaks_list = []
     for channel in ecg_data.T:
-        processed, info = nk.ecg_process(channel, sampling_rate=fs)
+        _, info = nk.ecg_process(channel, sampling_rate=fs)
         r_peaks = info["ECG_R_Peaks"]
         r_peaks_list.append(np.array(r_peaks))
     return r_peaks_list
 
 
-def average_heart_rate(r_peaks_list, fs):
+def compute_average_heart_rate(r_peaks_list, fs):
     """
-    Compute the average heart rate from R-peaks.
+    Compute the average heart rate (in BPM) from R-peaks.
 
     Parameters:
-      r_peaks_list (list of np.ndarray): A list of R-peak indices for each channel.
-      fs (float): Sampling frequency.
+        r_peaks_list (list): List of numpy arrays of R-peak indices.
+        fs (float): Sampling frequency.
 
     Returns:
-      float: Average heart rate in beats per minute.
+        float: Average heart rate in BPM.
     """
-    r_peaks = np.hstack(r_peaks_list)
-    rr_intervals = np.diff(r_peaks) / fs
-    heart_rate = 60 / np.mean(rr_intervals)
-    return heart_rate
+    all_r_peaks = np.hstack(r_peaks_list)
+    rr_intervals = np.diff(all_r_peaks) / fs
+    return 60 / np.mean(rr_intervals)
 
 
-# def detect_rsp_peaks(rsp_data, fs):
-#     """
-#     Detect respiratory peaks for multi-channel respiratory data.
-
-#     Parameters:
-#       rsp_data (np.ndarray): 2D array of shape (n_samples, n_channels)
-#       fs (float): Sampling frequency.
-
-#     Returns:
-#       list of np.ndarray: A list where each element is an array of detected respiratory peak indices for a channel.
-#     """
-#     # Ensure rsp_data is 2D.
-#     if rsp_data.ndim == 1:
-#         rsp_data = rsp_data.reshape(-1, 1)
-
-#     rsp_peaks_list = []
-#     for channel in rsp_data.T:
-#         processed, info = nk.rsp_process(channel, sampling_rate=fs)
-#         rsp_peaks = info["RSP_Peaks"]
-#         rsp_peaks_list.append(np.array(rsp_peaks))
-#     return rsp_peaks_list
-
-
-def plot_ecg(ecg_data, fs, r_peaks_list=None, mode="separate", channel_labels=None):
+def plot_ecg_signals(
+    ecg_data, fs, r_peaks_list=None, mode="separate", channel_labels=None
+):
     """
-    Plot multi-channel ECG data with detected R-peaks.
-
-    This function automatically computes the time axis using the provided sampling frequency.
+    Plot multi-channel ECG signals with detected R-peaks.
 
     Parameters:
-      ecg_data (np.ndarray): 2D array of shape (n_samples, n_channels).
-      fs (float): Sampling frequency.
-      r_peaks_list (list of np.ndarray, optional): List of R-peak indices for each channel.
-      mode (str): "separate" to plot each channel in its own subplot,
-                  "together" to overlay all channels in one plot.
-      channel_labels (list of str, optional): Labels for each channel. Defaults to "Channel 1", "Channel 2", etc.
+        ecg_data (np.ndarray): 2D array (n_samples x n_channels).
+        fs (float): Sampling frequency.
+        r_peaks_list (list): Optional list of R-peak indices per channel.
+        mode (str): "separate" or "together".
+        channel_labels (list): Optional channel names.
     """
     n_samples, n_channels = ecg_data.shape
-    t = np.arange(n_samples) / fs  # Automatically computed time vector
-
+    t = np.arange(n_samples) / fs
     if channel_labels is None:
         channel_labels = [f"Channel {i+1}" for i in range(n_channels)]
-
     if mode == "separate":
         plt.figure(figsize=(12, 3 * n_channels))
         for i in range(n_channels):
@@ -111,15 +89,14 @@ def plot_ecg(ecg_data, fs, r_peaks_list=None, mode="separate", channel_labels=No
                 plt.plot(
                     t[r_peaks_list[i]],
                     ecg_data[r_peaks_list[i], i],
-                    "o",
+                    "ro",
                     label=f"{channel_labels[i]} R-peaks",
                 )
         plt.xlabel("Time (s)")
         plt.ylabel("Amplitude")
-        plt.title("ECG Channels")
+        plt.title("ECG Signals")
         plt.legend()
         plt.tight_layout()
     else:
-        raise ValueError("Mode must be either 'separate' or 'together'")
-
+        raise ValueError("Invalid mode.")
     plt.show()

@@ -1,0 +1,13 @@
+# config.yaml
+data:
+  twix_file: "meas_MID00086_FID26450_DMI_PMU_250216_100rep.dat"
+  dicom_folder: "SE00078001 DMI_PMU_250216_100REP"
+  ecg_columns: "20"         # Use a slice (e.g., "18:21") or single index
+  n_phase_encodes_per_frame: 112
+  offset: 0
+  extended_pe_lines: 128
+
+processing:
+  sigma: 0.0886
+  selected_components: [2, 3, 4, 5, 6, 7, 8, 9]
+  num_bins: 15
