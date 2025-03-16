@@ -49,6 +49,58 @@ def get_dicom_framerate(folder_path):
         return None, None
 
 
+def get_total_phase_encodes(folder_path):
+    """
+    Determine the total number of phase encodes (full k-space phase encoding lines)
+    from the DICOM files in the given folder.
+
+    The function first looks for the "AcquisitionMatrix" attribute in a DICOM file.
+    If present and formatted as a list or tuple of four numbers, it assumes that the second
+    element corresponds to the number of phase encoding steps. If not available, it falls back
+    to the "Rows" attribute, which typically represents the image height (and hence the number
+    of phase encoding lines).
+
+    Parameters:
+        folder_path (str): Path to the folder containing DICOM (.dcm) files.
+
+    Returns:
+        int or None: The total number of phase encodes if found; otherwise, None.
+    """
+    dicom_files = [
+        os.path.join(folder_path, f)
+        for f in os.listdir(folder_path)
+        if f.lower().endswith(".dcm")
+    ]
+    if not dicom_files:
+        print("No DICOM files found in the specified folder.")
+        return None
+
+    # Read the first DICOM file
+    try:
+        ds = pydicom.dcmread(dicom_files[0])
+    except Exception as e:
+        print(f"Error reading DICOM file: {e}")
+        return None
+
+    # Try to get the AcquisitionMatrix attribute (DICOM tag (0018,1310))
+    if hasattr(ds, "AcquisitionMatrix"):
+        acq_matrix = ds.AcquisitionMatrix
+        # Check if acq_matrix is a list or tuple with at least 2 elements
+        if isinstance(acq_matrix, (list, tuple)) and len(acq_matrix) >= 2:
+            total_phase_encodes = int(acq_matrix[1])
+            print(f"Total phase encodes from AcquisitionMatrix: {total_phase_encodes}")
+            return total_phase_encodes
+
+    # Fall back to the Rows attribute (which typically equals the number of phase encodes)
+    if hasattr(ds, "Rows"):
+        total_phase_encodes = int(ds.Rows)
+        print(f"Total phase encodes from Rows attribute: {total_phase_encodes}")
+        return total_phase_encodes
+
+    print("Unable to determine total phase encodes from DICOM metadata.")
+    return None
+
+
 def read_twix_file(
     file_path,
     include_scans=None,
