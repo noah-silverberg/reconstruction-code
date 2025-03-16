@@ -26,20 +26,21 @@ def run_pipeline(config):
     print("Reading scan data and extracting parameters...")
     twix_file = config["data"]["twix_file"]
     dicom_folder = config["data"]["dicom_folder"]
-    n_phase_encodes_per_frame = config["data"]["n_phase_encodes_per_frame"]
+    n_frames = config["data"]["n_frames"]
     offset = config["data"]["offset"]
     extended_pe_lines = config["data"]["extended_pe_lines"]
-
-    # Read DICOM parameters for frame rate etc.
-    framerate, frame_time = di.get_dicom_framerate(dicom_folder)
-    fs = framerate * n_phase_encodes_per_frame
-    print(
-        f"Frame rate: {framerate:.2f} Hz, Frame time: {frame_time:.4f} s, fs: {fs:.2f}"
-    )
 
     # Read TWIX file.
     twix_data = di.read_twix_file(twix_file, include_scans=[-1], parse_pmu=False)
     kspace = di.extract_image_data(twix_data)
+
+    # Read DICOM parameters for frame rate etc.
+    framerate, frame_time = di.get_dicom_framerate(dicom_folder)
+    n_phase_encodes_per_frame = kspace.shape[0] // n_frames
+    fs = framerate * n_phase_encodes_per_frame
+    print(
+        f"Frame rate: {framerate:.2f} Hz, Frame time: {frame_time:.4f} s, fs: {fs:.2f}"
+    )
 
     # Read ECG data.
     ecg_columns = config["data"]["ecg_columns"]
@@ -55,7 +56,7 @@ def run_pipeline(config):
     print("Processing ECG data...")
     r_peaks_list = ecg.detect_r_peaks(ecg_data, fs)
     heart_rate = ecg.compute_average_heart_rate(r_peaks_list, fs)
-    ecg.plot_ecg_signals(ecg_data, fs, r_peaks_list, mode="separate")
+    # ecg.plot_ecg_signals(ecg_data, fs, r_peaks_list, mode="separate")
 
     # --- Component Analysis via Kernel PCA ---
     print("Performing kernel PCA on k-space data...")
@@ -63,9 +64,9 @@ def run_pipeline(config):
     kpca_model, X_kpca, frame_shape, orig_feature_dim = pca.perform_kernel_pca(
         kspace, n_phase_encodes_per_frame, kernel="rbf", sigma=sigma
     )
-    pca.plot_kernel_pc_time_series_and_fft(
-        X_kpca, sampling_rate=fs / n_phase_encodes_per_frame, n_components=5
-    )
+    # pca.plot_kernel_pc_time_series_and_fft(
+    #     X_kpca, sampling_rate=fs / n_phase_encodes_per_frame, n_components=5
+    # )
 
     # --- Cardiac Binning ---
     print("Binning k-space data by cardiac phase...")
@@ -90,8 +91,10 @@ def run_pipeline(config):
     print("Binned k-space shape:", binned_data.shape)
 
     # --- Image Reconstruction ---
-    print("Performing homodyne reconstruction on binned data...")
-    homodyne_images = recon.homodyne_reconstruction(binned_data, binned_count)
+    print("Reconstructing cine from binned data...")
+    homodyne_images = recon.direct_ifft_reconstruction(
+        binned_data, extended_pe_lines, offset, True
+    )
     print("Reconstructed image shape:", homodyne_images.shape)
     # Rotate/flip/crop as needed (example processing)
     homodyne_images = np.rot90(homodyne_images, k=1, axes=(1, 2))

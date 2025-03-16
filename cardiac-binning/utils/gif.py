@@ -28,7 +28,7 @@ def save_images_as_gif(images, filename, duration=0.2, cmap="gray"):
     for img in images:
         norm_img = (img - np.min(img)) / (np.ptp(img) + 1e-8)
         frames.append((norm_img * 255).astype(np.uint8))
-    imageio.mimsave(filename, frames, duration=duration)
+    imageio.mimsave(filename, frames, duration=duration, loop=0)
     print(f"Saved GIF to {filename}")
 
 
@@ -141,5 +141,5 @@ def save_kspace_as_gif(kspace, filename, duration=0.2, cmap="gray"):
         image = buf[..., :3]
         frames.append(image)
         plt.close(fig)
-    imageio.mimsave(filename, frames, duration=duration)
+    imageio.mimsave(filename, frames, duration=duration, loop=0)
     print(f"Saved k-space GIF to {filename}")
