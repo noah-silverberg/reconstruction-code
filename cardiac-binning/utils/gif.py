@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import math
 import utils.reconstruction as reconstruction
+from IPython.display import HTML
+import os
+import pydicom
 
 
 def save_images_as_gif(images, filename, duration=0.2, cmap="gray"):
@@ -33,9 +36,11 @@ def save_images_as_gif(images, filename, duration=0.2, cmap="gray"):
     print(f"Saved GIF to {filename}")
 
 
-def display_images_as_gif(images, interval=200, cmap="gray"):
+def display_images_as_gif(images, interval=200, cmap="gray", notebook=True):
     """
-    Display a sequence of images as an animated GIF using Matplotlib.
+    Display a sequence of images as an animated GIF.
+
+    When running in a Jupyter notebook, the animation is converted to HTML and displayed.
 
     Parameters:
       images : np.ndarray
@@ -44,8 +49,10 @@ def display_images_as_gif(images, interval=200, cmap="gray"):
           Interval between frames in milliseconds (default is 200 ms).
       cmap : str, optional
           Colormap for display.
+      notebook : bool, optional
+          If True, display in a Jupyter notebook (default True).
     """
-    fig = plt.figure()
+    fig = plt.figure(facecolor="black")
     im = plt.imshow(images[0], cmap=cmap, animated=True)
     plt.axis("off")
 
@@ -56,7 +63,13 @@ def display_images_as_gif(images, interval=200, cmap="gray"):
     ani = animation.FuncAnimation(
         fig, update_frame, frames=images.shape[0], interval=interval, blit=True
     )
-    plt.show()
+
+    if notebook:
+        plt.close(fig)
+        # Return the animation as HTML.
+        return HTML(ani.to_jshtml())
+    else:
+        plt.show()
 
 
 def save_kspace_as_gif(kspace, filename, duration=0.2, cmap="gray"):
@@ -132,90 +145,72 @@ def save_reconstructed_gif(frames, output_filename, duration=0.125):
     print(f"Reconstructed GIF saved as {output_filename}")
 
 
-def display_cine(frames, interval=125):
+def dicom_framerate_from_folder(folder_path):
+    # Get list of DICOM file paths in the folder.
+    dicom_files = [
+        os.path.join(folder_path, f)
+        for f in os.listdir(folder_path)
+        if f.endswith(".dcm")
+    ]
+
+    # Read all DICOMs.
+    dicoms = [pydicom.dcmread(f) for f in dicom_files]
+
+    # Sort by InstanceNumber (or use AcquisitionTime if needed)
+    dicoms.sort(key=lambda ds: int(ds.InstanceNumber))
+
+    # Option 1: If FrameTime is available, use that (usually in ms)
+    if hasattr(dicoms[0], "FrameTime"):
+        frame_time_ms = float(dicoms[0].FrameTime)  # in milliseconds
+        frame_time = frame_time_ms / 1000.0  # seconds
+        framerate = 1.0 / frame_time
+        return framerate, frame_time
+    # Option 2: If CineRate is available, use it (in fps)
+    elif hasattr(dicoms[0], "CineRate"):
+        framerate = float(dicoms[0].CineRate)
+        frame_time = 1.0 / framerate
+        return framerate, frame_time
+    # Option 3: Compute the average time difference from AcquisitionTime.
+    elif hasattr(dicoms[0], "AcquisitionTime"):
+
+        def time_to_seconds(t):
+            # t is typically a string like "123456.789"
+            hours = float(t[:2])
+            minutes = float(t[2:4])
+            seconds = float(t[4:])
+            return hours * 3600 + minutes * 60 + seconds
+
+        times = [time_to_seconds(ds.AcquisitionTime) for ds in dicoms]
+        # Compute differences between successive frames.
+        diffs = np.diff(times)
+        avg_diff = sum(diffs) / len(diffs)
+        framerate = 1.0 / avg_diff
+        return framerate, avg_diff
+    else:
+        return None, None
+
+
+def print_all_dicom_info(path):
     """
-    Display a cine (list/array of frames) as an animated plot.
+    Print all DICOM metadata from a file or from the first DICOM file in a folder.
 
     Parameters:
-      frames  : numpy array of shape (n_frames, height, width).
-      interval: Delay between frames in milliseconds.
+      path (str): Path to a DICOM file or a folder containing DICOM files.
     """
-    fig, ax = plt.subplots()
-    im = ax.imshow(frames[0], cmap="gray", animated=True)
-    ax.axis("off")
-
-    def update(frame):
-        im.set_array(frame)
-        return [im]
-
-    ani = animation.FuncAnimation(
-        fig, update, frames=frames, interval=interval, blit=True
-    )
-    plt.show()
-
-
-def display_multiple_cines(
-    U,
-    S,
-    Vt,
-    X_mean,
-    frame_shape,
-    selections,
-    n_bins,
-    n_coils,
-    interval=125,
-    output_filename=None,
-):
-    """
-    For a list of selections (each selection is an integer or list of PC indices),
-    reconstruct the corresponding cines from k-space PCA and display them simultaneously.
-
-    Parameters:
-      selections   : List of selections.
-      (Other parameters as in previous functions.)
-    """
-    cines = []
-    for sel in selections:
-        cine = reconstruction.reconstruct_with_selected_components_kspace(
-            U, S, Vt, X_mean, sel, frame_shape, n_bins, n_coils
-        )
-        cines.append(cine)
-    n = len(cines)
-    if n > 3:
-        nrows = 2
-        ncols = math.ceil(n / nrows)
+    if os.path.isdir(path):
+        # Process each file ending with .dcm (case-insensitive) in the folder.
+        dicom_files = [
+            os.path.join(path, f)
+            for f in os.listdir(path)
+            if f.lower().endswith(".dcm")
+        ]
+        if not dicom_files:
+            print("No DICOM files found in the specified folder.")
+            return
+        file = dicom_files[0]
+        print(f"===== Metadata for file: {file} =====")
+        ds = pydicom.dcmread(file)
+        print(ds)
     else:
-        nrows = 1
-        ncols = n
-    fig, axs = plt.subplots(nrows, ncols, figsize=(5 * ncols, 5 * nrows))
-    if nrows * ncols > 1:
-        axs = np.array(axs).flatten()
-    else:
-        axs = [axs]
-    ims = []
-    for i in range(n):
-        axs[i].axis("off")
-        im = axs[i].imshow(cines[i][0], cmap="gray", animated=True)
-        title = (
-            f"Selection: {selections[i]}"
-            if isinstance(selections[i], int)
-            else f"Selections: {selections[i]}"
-        )
-        axs[i].set_title(title)
-        ims.append(im)
-    for j in range(n, len(axs)):
-        axs[j].axis("off")
-    n_frames = cines[0].shape[0]
-
-    def update(frame):
-        for i in range(n):
-            ims[i].set_array(cines[i][frame])
-        return ims
-
-    ani = animation.FuncAnimation(
-        fig, update, frames=range(n_frames), interval=interval, blit=True
-    )
-    if output_filename is not None:
-        ani.save(output_filename, writer="pillow", fps=1000 / interval)
-        print(f"Animation saved as {output_filename}")
-    plt.show()
+        ds = pydicom.dcmread(path)
+        print(ds)

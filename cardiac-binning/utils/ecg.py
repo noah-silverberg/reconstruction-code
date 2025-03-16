@@ -26,6 +26,23 @@ def detect_r_peaks(ecg_data, fs):
     return r_peaks_list
 
 
+def average_heart_rate(r_peaks_list, fs):
+    """
+    Compute the average heart rate from R-peaks.
+
+    Parameters:
+      r_peaks_list (list of np.ndarray): A list of R-peak indices for each channel.
+      fs (float): Sampling frequency.
+
+    Returns:
+      float: Average heart rate in beats per minute.
+    """
+    r_peaks = np.hstack(r_peaks_list)
+    rr_intervals = np.diff(r_peaks) / fs
+    heart_rate = 60 / np.mean(rr_intervals)
+    return heart_rate
+
+
 # def detect_rsp_peaks(rsp_data, fs):
 #     """
 #     Detect respiratory peaks for multi-channel respiratory data.

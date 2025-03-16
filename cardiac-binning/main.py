@@ -168,6 +168,6 @@ gif.save_images_as_gif(
 )
 
 # Optionally display the reconstructed images as an animated GIF.
-gif.display_images_as_gif(homodyne_recon_images, interval=30)
+gif.display_images_as_gif(homodyne_recon_images, interval=30, notebook=False)
 
 gif.save_kspace_as_gif(binned_data, "binned_kspace.gif", duration=0.2, cmap="gray")

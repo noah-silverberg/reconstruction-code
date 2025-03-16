@@ -9,9 +9,10 @@ def bin_reconstructed_kspace_by_cardiac_phase_kernel(
     frame_shape,
     orig_feature_dim,
     r_peaks_list,
-    num_bins=30,
-    n_phase_encodes_per_frame=112,
-    extended_pe_lines=128,
+    num_bins,
+    n_phase_encodes_per_frame,
+    extended_pe_lines,
+    offset,
 ):
     """
     Reconstruct the k-space data using only the specified kernel PCA components (without applying inverse FFT),
@@ -27,6 +28,7 @@ def bin_reconstructed_kspace_by_cardiac_phase_kernel(
       num_bins (int): Number of cardiac bins.
       n_phase_encodes_per_frame (int): Number of phase encodes per frame.
       extended_pe_lines (int): Number of phase encode lines after extension.
+      offset : offset to place measured phase lines
 
     Returns:
       binned_data (np.ndarray): Binned k-space data of shape (num_bins, extended_pe_lines, n_coils, n_freq).
@@ -53,12 +55,13 @@ def bin_reconstructed_kspace_by_cardiac_phase_kernel(
         num_bins=num_bins,
         n_phase_encodes_per_frame=n_phase_encodes_per_frame,
         extended_pe_lines=extended_pe_lines,
+        offset=offset,
     )
     return binned_data, binned_count
 
 
 def bin_kspace_by_cardiac_phase(
-    r_peaks_list, img, num_bins=30, n_phase_encodes_per_frame=112, extended_pe_lines=128
+    r_peaks_list, img, num_bins, n_phase_encodes_per_frame, extended_pe_lines, offset
 ):
     """
     Bin image (k-space) data by cardiac phase.
@@ -69,13 +72,15 @@ def bin_kspace_by_cardiac_phase(
       img : np.ndarray
           The image (k-space) data as extracted from the TWIX file.
           Expected shape: (total_phase_encodes, coils, frequency_encodes).
-      num_bins : int, optional
+      num_bins : int
           Number of bins (frames) into which to group the data based on the cardiac cycle.
-      n_phase_encodes_per_frame : int, optional
+      n_phase_encodes_per_frame : int
           Number of phase-encode lines per frame (e.g., 112).
-      extended_pe_lines : int, optional
+      extended_pe_lines : int
           The number of phase-encode lines per frame after extension (e.g., 128). Lines that do not exist
           in the original data will remain zero.
+      offset : int
+          Offset to place measured phase lines
 
     Returns:
       binned_data : np.ndarray
@@ -128,13 +133,13 @@ def bin_kspace_by_cardiac_phase(
                 bin_idx = num_bins - 1
 
             # Accumulate the k-space line for the appropriate bin and phase-encode row.
-            binned_sum[bin_idx, row] += kspace_data[frame, row]
-            binned_count[bin_idx, row] += 1
+            binned_sum[bin_idx, row + offset] += kspace_data[frame, row]
+            binned_count[bin_idx, row + offset] += 1
 
     # Average the accumulated data when multiple lines fall into the same bin/row.
     binned_data = np.zeros_like(binned_sum)
-    for b in range(num_bins):
-        for r in range(extended_pe_lines):
+    for b in range(binned_count.shape[0]):
+        for r in range(binned_count.shape[1]):
             if binned_count[b, r] > 0:
                 binned_data[b, r] = binned_sum[b, r] / binned_count[b, r]
 

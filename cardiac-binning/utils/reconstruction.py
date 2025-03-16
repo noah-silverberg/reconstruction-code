@@ -258,7 +258,7 @@ def reconstruct_frames_kernel_kspace(kpca, X_kpca, frame_shape, orig_feature_dim
 
 
 def reconstruct_with_selected_components_kernel_kspace(
-    kpca, X_kpca, selection, frame_shape, orig_feature_dim
+    kpca, X_kpca, selection, frame_shape, orig_feature_dim, extended_pe_lines, offset
 ):
     """
     Reconstruct the k-space data using only the specified kernel PCA components,
@@ -271,6 +271,9 @@ def reconstruct_with_selected_components_kernel_kspace(
       selection (int or list): Either an integer or a list of component indices (0-indexed) to use.
       frame_shape (tuple): Shape of a single frame in the original domain (n_phase_encodes_per_frame, n_coils, n_freq).
       orig_feature_dim (int): Original number of features per frame before real conversion.
+      extended_pe_lines (int): Number of phase encode lines after extension.
+      offset : offset to place measured phase lines
+
 
     Returns:
       images_sos (np.ndarray): Reconstructed images with shape (n_frames, n_phase_encodes_per_frame, n_freq).
@@ -289,14 +292,18 @@ def reconstruct_with_selected_components_kernel_kspace(
     kspace_recon = X_recon_complex.reshape(
         n_frames, frame_shape[0], frame_shape[1], frame_shape[2]
     )
+    kspace_zerofilled = np.zeros(
+        (n_frames, extended_pe_lines, frame_shape[1], frame_shape[2]), dtype=complex
+    )
+    kspace_zerofilled[:, offset : offset + frame_shape[0], :, :] = kspace_recon
 
     images_recon = np.zeros(
-        (n_frames, frame_shape[0], frame_shape[1], frame_shape[2]), dtype=complex
+        (n_frames, extended_pe_lines, frame_shape[1], frame_shape[2]), dtype=complex
     )
     for b in range(n_frames):
         for c in range(frame_shape[1]):
             images_recon[b, :, c, :] = np.fft.fftshift(
-                np.fft.ifft2(kspace_recon[b, :, c, :])
+                np.fft.ifft2(kspace_zerofilled[b, :, c, :])
             )
 
     images_sos = np.sqrt(np.sum(np.abs(images_recon) ** 2, axis=2))
