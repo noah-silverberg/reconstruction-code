@@ -101,6 +101,29 @@ def get_total_phase_encodes(folder_path):
     return None
 
 
+def get_num_frames(folder_path):
+    """
+    Get the total number of DICOM frames (images) in the specified folder.
+
+    This function lists all files with the .dcm extension in the folder and returns their count.
+    It assumes that each DICOM file corresponds to one frame.
+
+    Parameters:
+        folder_path (str): Path to the folder containing DICOM (.dcm) files.
+
+    Returns:
+        int: The total number of DICOM frames, or 0 if no DICOM files are found.
+    """
+    dicom_files = [
+        os.path.join(folder_path, f)
+        for f in os.listdir(folder_path)
+        if f.lower().endswith(".dcm")
+    ]
+    num_frames = len(dicom_files)
+    print(f"Found {num_frames} DICOM frames in folder {folder_path}")
+    return num_frames
+
+
 def read_twix_file(
     file_path,
     include_scans=None,
