@@ -49,6 +49,29 @@ def get_dicom_framerate(folder_path):
         return None, None
 
 
+def print_all_dicom_info(path):
+    """
+    Print metadata from a DICOM file or the first file in a folder.
+
+    Parameters:
+        path (str): File or folder path.
+    """
+    if os.path.isdir(path):
+        dicom_files = [
+            os.path.join(path, f)
+            for f in os.listdir(path)
+            if f.lower().endswith(".dcm")
+        ]
+        if not dicom_files:
+            print("No DICOM files found.")
+            return
+        file = dicom_files[0]
+    else:
+        file = path
+    ds = pydicom.dcmread(file)
+    print(f"Metadata for {file}:\n", ds)
+
+
 def get_total_phase_encodes(folder_path):
     """
     Determine the total number of phase encodes (full k-space phase encoding lines)
