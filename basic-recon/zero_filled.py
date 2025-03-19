@@ -9,12 +9,12 @@ from collections import defaultdict
 def reconstruct_frame(
     mdb_list,
     full_phase=128,
-    full_readout=200,
-    crop_lower=8,
-    crop_upper=136,
-    full_target_readout=128,
-    phase_offset=32,
-    return_kspace=False,
+    # full_readout=200,
+    crop_lower=0,
+    crop_upper=256,
+    full_target_readout=256,
+    phase_offset=0,
+    return_kspace=True,
 ):
     """
     Reconstruct one frame from a list of mdb blocks.
@@ -84,7 +84,9 @@ def reconstruct_frame(
 
 
 def main():
-    filename = "Cine.dat"
+    filename = (
+        "reconstruction-code/binning/meas_MID00086_FID26450_DMI_PMU_250216_100rep.dat"
+    )
     # Read the twix data
     twix = twixtools.read_twix(filename)
     meas = twix[-1]

@@ -35,8 +35,8 @@ def create_difference_gif(gif1, gif2, output_gif, duration=0.125):
 
 def main():
     # Input the names of the two GIF files you want to compare.
-    gif1 = "cine_recon.gif"
-    gif2 = "cine_conjugate_symmetry.gif"
+    gif1 = "zero_filled_cine.gif"
+    gif2 = "conjugate_symmetry_cine.gif"
     output_gif = "difference.gif"
 
     create_difference_gif(gif1, gif2, output_gif, duration=0.125)
