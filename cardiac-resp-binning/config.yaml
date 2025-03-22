@@ -18,9 +18,11 @@ processing:
   # decomposition_method: "kernel_pca" # "ica", "pca", or "kernel_pca"
   # sigma: 0.0886 # For kernel PCA
   # selected_components: [2, 3, 4, 5, 6, 7, 8, 9]
+  resp_bin_method: "physio" # Options: "even" or "physio"
   num_cardiac_bins: 10
-  num_resp_bins: 2
+  num_inhalation_bins: 1
+  num_exhalation_bins: 1
   resp_peak_method: "scipy"
   resp_peak_kwargs: {"height": 0.6, "prominence": 0.2}
-  # resp_trough_method: "scipy"
-  # resp_trough_kwargs: {"height": 0.6, "prominence": 0.2}
+  resp_trough_method: "scipy"
+  resp_trough_kwargs: {"height": 0.6, "prominence": 0.2}

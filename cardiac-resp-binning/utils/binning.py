@@ -218,3 +218,123 @@ def bin_reconstructed_kspace_joint(
                     binned_data[i, j, r] = binned_sum[i, j, r] / binned_count[i, j, r]
 
     return binned_data, binned_count
+
+
+def bin_reconstructed_kspace_joint_physio(
+    reconstructed_kspace,
+    r_peaks,  # 1D array/list of global indices for cardiac cycles
+    resp_peaks,  # 1D array/list of global indices for respiratory peaks (max inhalation)
+    resp_troughs,  # 1D array/list of global indices for respiratory troughs (max exhalation)
+    num_cardiac_bins,
+    num_exhalation_bins,
+    num_inhalation_bins,
+    n_phase_encodes_per_frame,
+    extended_phase_lines,
+    row_offset,
+):
+    """
+    Jointly bin reconstructed k-space data by cardiac phase and physiological respiratory phase.
+
+    Here, we assume that:
+      - r_peaks defines the boundaries for cardiac cycles (even division as before).
+      - For respiration, we assume that resp_peaks mark maximum inhalation and resp_troughs mark maximum exhalation.
+        Then the exhalation phase is from a resp_peak to the following resp_trough, and the inhalation phase is from that trough to the next resp_peak.
+
+    The user specifies how many bins to subdivide the exhalation phase (num_exhalation_bins)
+    and the inhalation phase (num_inhalation_bins). The overall respiratory dimension will be
+    num_exhalation_bins + num_inhalation_bins.
+
+    Parameters:
+        reconstructed_kspace (np.ndarray): shape (n_frames, n_phase_encodes_per_frame, n_coils, n_freq)
+        r_peaks (array-like): global indices for cardiac R-peaks.
+        resp_peaks (array-like): global indices for respiratory peaks (max inhalation)
+        resp_troughs (array-like): global indices for respiratory troughs (max exhalation)
+        num_cardiac_bins (int): Number of cardiac bins.
+        num_exhalation_bins (int): Number of bins for exhalation.
+        num_inhalation_bins (int): Number of bins for inhalation.
+        n_phase_encodes_per_frame, extended_phase_lines, row_offset: as before.
+
+    Returns:
+        tuple: (binned_data, binned_count) where:
+           - binned_data has shape (num_cardiac_bins, total_resp_bins, extended_phase_lines, n_coils, n_freq)
+           - total_resp_bins = num_exhalation_bins + num_inhalation_bins
+           - binned_count has shape (num_cardiac_bins, total_resp_bins, extended_phase_lines)
+    """
+    import numpy as np
+
+    n_frames, n_phase, n_coils, n_freq = reconstructed_kspace.shape
+    total_resp_bins = num_exhalation_bins + num_inhalation_bins
+
+    # Initialize accumulators.
+    binned_sum = np.zeros(
+        (num_cardiac_bins, total_resp_bins, extended_phase_lines, n_coils, n_freq),
+        dtype=reconstructed_kspace.dtype,
+    )
+    binned_count = np.zeros(
+        (num_cardiac_bins, total_resp_bins, extended_phase_lines), dtype=np.int64
+    )
+
+    for f in range(n_frames):
+        for row in range(n_phase):
+            global_idx = f * n_phase + row
+
+            # Determine cardiac bin (same as before).
+            cycle_idx_c = np.searchsorted(r_peaks, global_idx, side="right") - 1
+            if cycle_idx_c < 0 or cycle_idx_c >= len(r_peaks) - 1:
+                continue
+            c_start = r_peaks[cycle_idx_c]
+            c_end = r_peaks[cycle_idx_c + 1]
+            fraction_c = (global_idx - c_start) / (c_end - c_start)
+            cardiac_bin = int(np.floor(fraction_c * num_cardiac_bins))
+            if cardiac_bin >= num_cardiac_bins:
+                cardiac_bin = num_cardiac_bins - 1
+
+            # Physiological respiratory binning.
+            # We assume that resp_peaks and resp_troughs alternate.
+            # If the most recent event is a peak, then we are in exhalation (from peak to next trough).
+            idx_peak = np.searchsorted(resp_peaks, global_idx, side="right") - 1
+            idx_trough = np.searchsorted(resp_troughs, global_idx, side="right") - 1
+            if idx_peak < 0 or idx_trough < 0:
+                continue
+            last_peak = resp_peaks[idx_peak]
+            last_trough = resp_troughs[idx_trough]
+
+            if last_peak > last_trough:
+                # We are in exhalation: from last_peak to next trough.
+                if idx_trough + 1 < len(resp_troughs):
+                    next_trough = resp_troughs[idx_trough + 1]
+                else:
+                    continue
+                fraction_resp = (global_idx - last_peak) / (next_trough - last_peak)
+                resp_bin = int(np.floor(fraction_resp * num_exhalation_bins))
+                if resp_bin >= num_exhalation_bins:
+                    resp_bin = num_exhalation_bins - 1
+                overall_resp_bin = resp_bin  # exhalation bins come first.
+            else:
+                # We are in inhalation: from last_trough to next peak.
+                if idx_peak + 1 < len(resp_peaks):
+                    next_peak = resp_peaks[idx_peak + 1]
+                else:
+                    continue
+                fraction_resp = (global_idx - last_trough) / (next_peak - last_trough)
+                resp_bin = int(np.floor(fraction_resp * num_inhalation_bins))
+                if resp_bin >= num_inhalation_bins:
+                    resp_bin = num_inhalation_bins - 1
+                overall_resp_bin = (
+                    num_exhalation_bins + resp_bin
+                )  # inhalation bins come after exhalation bins.
+
+            # Accumulate the k-space line.
+            binned_sum[
+                cardiac_bin, overall_resp_bin, row + row_offset
+            ] += reconstructed_kspace[f, row]
+            binned_count[cardiac_bin, overall_resp_bin, row + row_offset] += 1
+
+    # Compute averages.
+    binned_data = np.zeros_like(binned_sum)
+    for i in range(num_cardiac_bins):
+        for j in range(total_resp_bins):
+            for r in range(extended_phase_lines):
+                if binned_count[i, j, r] > 0:
+                    binned_data[i, j, r] = binned_sum[i, j, r] / binned_count[i, j, r]
+    return binned_data, binned_count

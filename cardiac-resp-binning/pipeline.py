@@ -27,11 +27,6 @@ def run_pipeline(config):
     n_frames = config["data"]["n_frames"]
     row_offset = config["data"]["offset"]
     extended_phase_lines = config["data"]["extended_pe_lines"]
-    events_file = config["data"]["event_file"]
-    resp_file = config["data"]["resp_file"]
-    resp_peak_kwargs = config["processing"]["resp_peak_kwargs"]
-    height = resp_peak_kwargs["height"]
-    prominence = resp_peak_kwargs["prominence"]
 
     twix_data = di.read_twix_file(twix_file, include_scans=[-1], parse_pmu=False)
     kspace = di.extract_image_data(twix_data)
@@ -54,6 +49,7 @@ def run_pipeline(config):
     #     raise ValueError("Mismatch between phase encodes and ECG samples.")
 
     print("Processing ECG data (R-peak detection)...")
+    events_file = config["data"]["event_file"]
     events = ecg_resp.load_and_resample_events(events_file, kspace.shape[0])
     r_peaks = np.nonzero(events)[0]
     # r_peaks_list = ecg_resp.detect_r_peaks(ecg_data, fs)
@@ -61,103 +57,87 @@ def run_pipeline(config):
     print(f"Estimated Heart Rate: {heart_rate:.1f} BPM")
 
     print("Processing Resp data (peak detection)...")
+
+    resp_file = config["data"]["resp_file"]
+    resp_bin_method = config["processing"].get("resp_bin_method", "even")
+    resp_peak_method = config["processing"].get("resp_peak_method", "nk")
+    resp_peak_height, resp_peak_prominence = None, None
+    if resp_peak_method == "scipy":
+        resp_peak_kwargs = config["processing"]["resp_peak_kwargs"]
+        resp_peak_height = resp_peak_kwargs["height"]
+        resp_peak_prominence = resp_peak_kwargs["prominence"]
+    if resp_bin_method == "physio":
+        resp_trough_method = config["processing"].get("resp_trough_method", "nk")
+        resp_trough_height, resp_trough_prominence = None, None
+        if resp_trough_method == "scipy":
+            resp_trough_kwargs = config["processing"]["resp_trough_kwargs"]
+            resp_trough_height = resp_trough_kwargs["height"]
+            resp_trough_prominence = resp_trough_kwargs["prominence"]
+
     resp_data = ecg_resp.load_and_resample_resp(resp_file, kspace.shape[0])
     resp_peaks = ecg_resp.detect_resp_peaks(
-        resp_data, fs, method="scipy", height=height, prominence=prominence
+        resp_data,
+        fs,
+        method=resp_peak_method,
+        height=resp_peak_height,
+        prominence=resp_peak_prominence,
     )
-
-    # --- Decomposition & Reconstruction ---
-    # print(
-    #     "Performing decomposition and reconstructing k-space with selected components..."
-    # )
-    # decomposition_method = config["processing"]["decomposition_method"].lower()
-    # selected_components = config["processing"]["selected_components"]
-    # n_components = config["processing"].get("n_components", None)
-    # breathing_idx = config["processing"]["breathing_component"]
-
-    # if decomposition_method == "pca":
-    #     # Standard PCA
-    #     pca_model = pca.perform_pca(kspace, n_phase_encodes_per_frame)
-    #     frame_shape = pca_model[-1]
-    #     reconstructed_kspace = pca.reconstruct_kspace_from_components(
-    #         method="pca",
-    #         model=pca_model,
-    #         transformed_data=None,  # Not used for PCA
-    #         components_to_keep=selected_components,
-    #         frame_shape=frame_shape,
-    #         X_mean=pca_model[3],
-    #     )
-    #     # Extract the respiratory signal
-    #     resp_signal = pca_model[0][:, breathing_idx]
-    # elif decomposition_method == "kernel_pca":
-    #     # Kernel PCA
-    #     sigma = config["processing"]["sigma"]
-    #     kpca_model, X_kpca, frame_shape, orig_feature_dim = pca.perform_kernel_pca(
-    #         kspace,
-    #         n_phase_encodes_per_frame,
-    #         kernel="rbf",
-    #         sigma=sigma,
-    #         n_components=n_components,
-    #     )
-    #     reconstructed_kspace = pca.reconstruct_kspace_from_components(
-    #         method="kernel_pca",
-    #         model=kpca_model,
-    #         transformed_data=X_kpca,
-    #         components_to_keep=selected_components,
-    #         frame_shape=frame_shape,
-    #         orig_feature_dim=orig_feature_dim,
-    #     )
-    #     # Extract the respiratory signal
-    #     resp_signal = X_kpca[:, breathing_idx]
-    # elif decomposition_method == "ica":
-    #     # ICA
-    #     ica_model, X_ica, frame_shape, orig_feature_dim = pca.perform_ica(
-    #         kspace, n_phase_encodes_per_frame, n_components=n_components
-    #     )
-    #     reconstructed_kspace = pca.reconstruct_kspace_from_components(
-    #         method="ica",
-    #         model=ica_model,
-    #         transformed_data=X_ica,
-    #         components_to_keep=selected_components,
-    #         frame_shape=frame_shape,
-    #         orig_feature_dim=orig_feature_dim,
-    #     )
-    #     # Extract the respiratory signal
-    #     resp_signal = X_ica[:, breathing_idx]
-    # else:
-    #     raise ValueError(f"Unknown decomposition method: {decomposition_method}")
 
     # --- Cardiac/Resp Binning ---
     print("Binning k-space data by cardiac & respiratory phases...")
     num_cardiac_bins = config["processing"]["num_cardiac_bins"]
-    num_respiratory_bins = config["processing"]["num_resp_bins"]
-    binned_data, binned_count = binning.bin_reconstructed_kspace_joint(
-        kspace.reshape(n_frames, -1, kspace.shape[1], kspace.shape[2]),
-        r_peaks.flatten(),
-        resp_peaks.flatten(),
-        num_cardiac_bins=num_cardiac_bins,
-        num_respiratory_bins=num_respiratory_bins,
-        n_phase_encodes_per_frame=n_phase_encodes_per_frame,
-        extended_phase_lines=extended_phase_lines,
-        row_offset=row_offset,
-    )
+    if resp_bin_method == "even":
+        num_resp_bins = config["processing"]["num_resp_bins"]
+        binned_data, binned_count = binning.bin_reconstructed_kspace_joint(
+            kspace.reshape(n_frames, -1, kspace.shape[1], kspace.shape[2]),
+            r_peaks.flatten(),
+            resp_peaks.flatten(),
+            num_cardiac_bins=num_cardiac_bins,
+            num_respiratory_bins=num_resp_bins,
+            n_phase_encodes_per_frame=n_phase_encodes_per_frame,
+            extended_phase_lines=extended_phase_lines,
+            row_offset=row_offset,
+        )
+    else:  # physiological binning
+        # Also detect respiratory troughs (using the negative signal)
+        resp_troughs = ecg_resp.detect_resp_peaks(
+            -resp_data,
+            fs,
+            method=resp_trough_method,
+            height=resp_trough_height,
+            prominence=resp_trough_prominence,
+        )
+        num_exhalation_bins = config["processing"]["num_exhalation_bins"]
+        num_inhalation_bins = config["processing"]["num_inhalation_bins"]
+        num_respiratory_bins = num_exhalation_bins + num_inhalation_bins
+        binned_data, binned_count = binning.bin_reconstructed_kspace_joint_physio(
+            kspace.reshape(n_frames, -1, kspace.shape[1], kspace.shape[2]),
+            r_peaks.flatten(),
+            resp_peaks.flatten(),
+            resp_troughs.flatten(),
+            num_cardiac_bins=num_cardiac_bins,
+            num_exhalation_bins=num_exhalation_bins,
+            num_inhalation_bins=num_inhalation_bins,
+            n_phase_encodes_per_frame=n_phase_encodes_per_frame,
+            extended_phase_lines=extended_phase_lines,
+            row_offset=row_offset,
+        )
     print("Binned k-space shape:", binned_data.shape)
 
     cine_images_list = []  # To store reconstructed cine images per respiratory phase
 
     # Loop over respiratory bins
     for resp_bin in range(num_respiratory_bins):
-        # Extract binned data for the current respiratory phase.
-        # binned_data_resp has shape: (num_cardiac_bins, extended_phase_lines, n_coils, n_freq)
         binned_data_resp = binned_data[:, resp_bin, :, :, :]
+        binned_count_resp = binned_count[
+            :, resp_bin, :
+        ]  # assuming same row dimension as extended_pe_lines
 
-        # Reconstruct cine images for the current respiratory phase.
-        # Here, the "frames" are the cardiac bins.
         images = recon.direct_ifft_reconstruction(
             binned_data_resp,
             extended_pe_lines=extended_phase_lines,
-            # offset=row_offset,
-            use_conjugate_symmetry=True,  # or False, based on your preference
+            use_conjugate_symmetry=True,
+            count_mask=binned_count_resp,
         )
         print(f"Respiratory phase {resp_bin}: Reconstructed image shape:", images.shape)
 
