@@ -106,3 +106,115 @@ def bin_reconstructed_kspace_by_cardiac_phase_kernel(
         extended_pe_lines,
         offset,
     )
+
+
+def bin_reconstructed_kspace_joint(
+    reconstructed_kspace,
+    r_peaks,  # 1D array/list of global indices for cardiac R-peaks
+    resp_peaks,  # 1D array/list of global indices for respiratory peaks
+    num_cardiac_bins,
+    num_respiratory_bins,
+    n_phase_encodes_per_frame,
+    extended_phase_lines,
+    row_offset,
+):
+    """
+    Jointly bin reconstructed k-space data by both cardiac and respiratory phase.
+
+    Both r_peaks and resp_peaks are assumed to be 1D arrays/lists containing global phase
+    encode indices that mark the start of each cycle.
+
+    For each phase encode (line) in the k-space (indexed by the global index computed as
+    f * n_phase_encodes_per_frame + row), the function:
+      - Determines its fractional position within the current cardiac cycle using r_peaks.
+      - Determines its fractional position within the current respiratory cycle using resp_peaks.
+      - Scales these fractions to the number of cardiac and respiratory bins.
+
+    The k-space data is then accumulated into a joint bin with shape:
+        (num_cardiac_bins, num_respiratory_bins, extended_phase_lines, n_coils, n_freq)
+
+    Parameters:
+        reconstructed_kspace (np.ndarray):
+            Shape (n_frames, n_phase_encodes_per_frame, n_coils, n_freq).
+        r_peaks (array-like):
+            1D array or list of global indices for cardiac R-peaks.
+        resp_peaks (array-like):
+            1D array or list of global indices for respiratory peaks.
+        num_cardiac_bins (int):
+            Number of cardiac bins.
+        num_respiratory_bins (int):
+            Number of respiratory bins.
+        n_phase_encodes_per_frame (int):
+            Number of phase encodes per frame.
+        extended_phase_lines (int):
+            Total number of phase lines in the output (for zero filling).
+        row_offset (int):
+            Offset to add to the row index when placing data into the extended phase lines.
+
+    Returns:
+        tuple: (binned_data, binned_count)
+            - binned_data has shape
+              (num_cardiac_bins, num_respiratory_bins, extended_phase_lines, n_coils, n_freq)
+            - binned_count has shape
+              (num_cardiac_bins, num_respiratory_bins, extended_phase_lines)
+    """
+    import numpy as np
+
+    n_frames, n_phase, n_coils, n_freq = reconstructed_kspace.shape
+
+    # Ensure r_peaks and resp_peaks are numpy arrays of type int.
+    r_peaks = np.array(r_peaks, dtype=int)
+    resp_peaks = np.array(resp_peaks, dtype=int)
+
+    # Initialize accumulators for joint binning.
+    binned_sum = np.zeros(
+        (num_cardiac_bins, num_respiratory_bins, extended_phase_lines, n_coils, n_freq),
+        dtype=reconstructed_kspace.dtype,
+    )
+    binned_count = np.zeros(
+        (num_cardiac_bins, num_respiratory_bins, extended_phase_lines), dtype=np.int64
+    )
+
+    # Loop over each frame and each phase-encode line.
+    for f in range(n_frames):
+        for row in range(n_phase):
+            # Global phase-encode index.
+            global_idx = f * n_phase + row
+
+            # --- Determine cardiac bin ---
+            cycle_idx_c = np.searchsorted(r_peaks, global_idx, side="right") - 1
+            if cycle_idx_c < 0 or cycle_idx_c >= len(r_peaks) - 1:
+                continue  # Skip if not within a valid cardiac cycle.
+            c_start = r_peaks[cycle_idx_c]
+            c_end = r_peaks[cycle_idx_c + 1]
+            fraction_c = (global_idx - c_start) / (c_end - c_start)
+            cardiac_bin = int(np.floor(fraction_c * num_cardiac_bins))
+            if cardiac_bin >= num_cardiac_bins:
+                cardiac_bin = num_cardiac_bins - 1
+
+            # --- Determine respiratory bin ---
+            cycle_idx_r = np.searchsorted(resp_peaks, global_idx, side="right") - 1
+            if cycle_idx_r < 0 or cycle_idx_r >= len(resp_peaks) - 1:
+                continue  # Skip if not within a valid respiratory cycle.
+            r_start = resp_peaks[cycle_idx_r]
+            r_end = resp_peaks[cycle_idx_r + 1]
+            fraction_r = (global_idx - r_start) / (r_end - r_start)
+            resp_bin = int(np.floor(fraction_r * num_respiratory_bins))
+            if resp_bin >= num_respiratory_bins:
+                resp_bin = num_respiratory_bins - 1
+
+            # Place the current k-space line into the joint bin (adjust row index by row_offset).
+            binned_sum[cardiac_bin, resp_bin, row + row_offset] += reconstructed_kspace[
+                f, row
+            ]
+            binned_count[cardiac_bin, resp_bin, row + row_offset] += 1
+
+    # Average the bins where the count is greater than zero.
+    binned_data = np.zeros_like(binned_sum)
+    for i in range(num_cardiac_bins):
+        for j in range(num_respiratory_bins):
+            for r in range(extended_phase_lines):
+                if binned_count[i, j, r] > 0:
+                    binned_data[i, j, r] = binned_sum[i, j, r] / binned_count[i, j, r]
+
+    return binned_data, binned_count

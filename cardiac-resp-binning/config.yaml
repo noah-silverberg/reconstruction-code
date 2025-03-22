@@ -1,27 +1,26 @@
 data:
-  twix_file: "meas_MID00086_FID26450_DMI_PMU_250216_100rep.dat"
-  dicom_folder: "SE00078001 DMI_PMU_250216_100REP"
-  ecg_columns: "20"         # Use a slice (e.g., "18:21") or single index
+  twix_file: "20250307_JM/raw/meas_MID00115_FID27380_Cor_250306_2.dat"
+  dicom_folder: "20250307_JM/dcm/SE00028001 COR_250306_2"
+  # ecg_columns: "18:21"         # Use a slice (e.g., "18:21") or single index
+  ecg_files: [
+    "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_ECG1_25.log",
+    "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_ECG2_25.log",
+    "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_ECG3_25.log",
+    "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_ECG4_25.log",
+  ]
+  event_file: "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_EVNT_25.log"
+  resp_file: "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_RESP_200.log"
   n_frames: 100
   extended_pe_lines: 128
-  offset: 0
+  offset: 32
 
 processing:
-  decomposition_method: "kernel_pca" # "ica", "pca", or "kernel_pca"
-  sigma: 0.0886 # For kernel PCA
-  selected_components: [2, 3, 4, 5, 6, 7, 8, 9]
-  num_bins: 20
-
-# data:
-#   twix_file: "20250307_JM/raw/meas_MID00114_FID27379_Cor_250306_2.dat"
-#   dicom_folder: "20250307_JM/dcm/SE00027001 COR_250306_2"
-#   ecg_columns: "18:21"         # Use a slice (e.g., "18:21") or single index
-#   n_frames: 100
-#   extended_pe_lines: 128
-#   offset: 0
-
-# processing:
-#   decomposition_method: "kernel_pca" # "ica", "pca", or "kernel_pca"
-#   sigma: 0.0886 # For kernel PCA
-#   selected_components: [2, 3, 4, 5, 6, 7, 8, 9]
-#   num_bins: 20
+  # decomposition_method: "kernel_pca" # "ica", "pca", or "kernel_pca"
+  # sigma: 0.0886 # For kernel PCA
+  # selected_components: [2, 3, 4, 5, 6, 7, 8, 9]
+  num_cardiac_bins: 10
+  num_resp_bins: 2
+  resp_peak_method: "scipy"
+  resp_peak_kwargs: {"height": 0.6, "prominence": 0.2}
+  # resp_trough_method: "scipy"
+  # resp_trough_kwargs: {"height": 0.6, "prominence": 0.2}
