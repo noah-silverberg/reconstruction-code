@@ -43,7 +43,7 @@ def compute_average_heart_rate(r_peaks_list, fs):
     Returns:
         float: Average heart rate in BPM.
     """
-    all_r_peaks = np.hstack(r_peaks_list)
+    all_r_peaks = np.vstack(r_peaks_list)
     rr_intervals = np.diff(all_r_peaks) / fs
     return 60 / np.mean(rr_intervals)
 
