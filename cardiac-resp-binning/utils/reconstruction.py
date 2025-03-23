@@ -5,6 +5,7 @@ Functions to reconstruct images (and k-space) from partial or processed k-space 
 """
 
 import numpy as np
+import pygrappa
 
 
 def direct_ifft_reconstruction(
@@ -100,3 +101,55 @@ def fill_conjugate_symmetry(kspace_zf, measured_mask):
                     kspace_zf[i, r, :, :] = np.conjugate(kspace_zf[i, sym_r, :, :])
 
     return kspace_zf
+
+
+def grappa_reconstruction(kspace, calib_region, kernel_size=(5, 5)):
+    """
+    Perform basic cGRAPPA reconstruction on each frame individually using pygrappa.cgrappa.
+    Each frame is treated as an individual image.
+
+    Parameters
+    ----------
+    kspace : np.ndarray
+        Undersampled k-space data of shape (n_frames, n_phase_encodes, n_coils, n_freq).
+    calib_region : tuple or list
+        Two-element tuple (start_line, end_line) specifying the autocalibration region for each frame.
+    kernel_size : tuple, optional
+        Size of the GRAPPA kernel (default is (5, 5)).
+
+    Returns
+    -------
+    np.ndarray
+        Reconstructed images after coil combination, of shape (n_frames, output_rows, n_freq).
+    """
+    n_frames = kspace.shape[0]
+    recon_images_all = []
+
+    for i in range(n_frames):
+        # Convert the current frame to double precision
+        frame_kspace = np.array(kspace[i], dtype=np.complex128)
+
+        # Extract calibration data from this frame (and explicitly convert it)
+        start_line, end_line = calib_region
+        calib_data = np.array(
+            frame_kspace[start_line:end_line, :, :], dtype=np.complex128
+        )
+
+        # Call cGRAPPA on the individual frame.
+        # Now the frame_kspace and calib_data are both np.complex128.
+        recon_kspace_frame = pygrappa.cgrappa(
+            frame_kspace, calib_data, kernel_size=kernel_size, coil_axis=1
+        )
+
+        # Inverse FFT on each coil and combine them with sum-of-squares.
+        n_phase, n_coils, n_freq = recon_kspace_frame.shape
+        coil_images = []
+        for ch in range(n_coils):
+            img = np.fft.ifft2(recon_kspace_frame[:, ch, :])
+            img = np.fft.fftshift(img)
+            coil_images.append(img)
+        coil_images = np.array(coil_images)
+        recon_img = np.sqrt(np.sum(np.abs(coil_images) ** 2, axis=0))
+        recon_images_all.append(recon_img)
+
+    return np.array(recon_images_all)

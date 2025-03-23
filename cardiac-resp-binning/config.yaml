@@ -15,12 +15,13 @@ data:
   offset: 32
 
 processing:
-  resp_bin_method: "even" # Options: "even" or "physio"
+  resp_bin_method: "physio" # Options: "even" or "physio"
   num_cardiac_bins: 10
-  num_resp_bins: 1         # Only used if resp_bin_method is "even"
-  # num_inhalation_bins: 1   # Only used if resp_bin_method is "physio"
-  # num_exhalation_bins: 1   # Only used if resp_bin_method is "physio"
+  # num_resp_bins: 1         # Only used if resp_bin_method is "even"
+  num_inhalation_bins: 3   # Only used if resp_bin_method is "physio"
+  num_exhalation_bins: 1   # Only used if resp_bin_method is "physio"
   resp_peak_method: "scipy" # Options: "scipy" or "nk"
   resp_peak_kwargs: {"height": 0.6, "prominence": 0.2} # Only used if resp_peak_method is "scipy"
   resp_trough_method: "scipy" # Options: "scipy" or "nk"
   resp_trough_kwargs: {"height": 0.6, "prominence": 0.2} # Only used if resp_trough_method is "scipy"
+  reconstruction_method: "grappa" # Options: "grappa", "zf", "conj_symm"
