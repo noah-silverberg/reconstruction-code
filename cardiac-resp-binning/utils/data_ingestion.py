@@ -1,8 +1,8 @@
 """
 data_ingestion.py
 
-This module provides functions to read raw scan data (TWIX files) and to
-extract basic parameters (like frame rate from DICOM files) needed for the pipeline.
+Provides functions to read raw scan data (TWIX files) and extract basic parameters
+(like frame rate and number of phase-encode lines from DICOM files).
 """
 
 import os
@@ -13,13 +13,22 @@ import twixtools
 
 def get_dicom_framerate(folder_path):
     """
-    Extract the frame rate and frame time from DICOM files in the given folder.
+    Extract the frame rate and frame time from the first DICOM file in the given folder.
 
-    Parameters:
-        folder_path (str): Path to the folder containing DICOM (.dcm) files.
+    This tries a few common DICOM fields:
+      - FrameTime
+      - CineRate
+      - AcquisitionTime (fallback)
 
-    Returns:
-        tuple: (framerate in Hz, frame_time in seconds) or (None, None) if not found.
+    Parameters
+    ----------
+    folder_path : str
+        Path to the folder containing DICOM (.dcm) files.
+
+    Returns
+    -------
+    tuple
+        (framerate, frame_time). Both are floats. If not found, (None, None).
     """
     dicom_files = [
         os.path.join(folder_path, f)
@@ -28,33 +37,45 @@ def get_dicom_framerate(folder_path):
     ]
     if not dicom_files:
         return None, None
+
     dicoms = [pydicom.dcmread(f) for f in dicom_files]
+    # Sort by instance to pick a consistent one (often the first slice)
     dicoms.sort(key=lambda ds: int(ds.InstanceNumber))
-    if hasattr(dicoms[0], "FrameTime"):
-        frame_time = float(dicoms[0].FrameTime) / 1000.0
+
+    ds = dicoms[0]
+    # Try FrameTime (0018,1062)
+    if hasattr(ds, "FrameTime"):
+        frame_time = float(ds.FrameTime) / 1000.0  # convert ms to s
         return 1.0 / frame_time, frame_time
-    elif hasattr(dicoms[0], "CineRate"):
-        framerate = float(dicoms[0].CineRate)
-        return framerate, 1.0 / framerate
-    elif hasattr(dicoms[0], "AcquisitionTime"):
+
+    # Try CineRate (0018,0040)
+    if hasattr(ds, "CineRate"):
+        frate = float(ds.CineRate)
+        return frate, 1.0 / frate
+
+    # Fallback: use differences in AcquisitionTime across slices
+    if hasattr(ds, "AcquisitionTime"):
 
         def time_to_seconds(t):
             return int(t[:2]) * 3600 + int(t[2:4]) * 60 + float(t[4:])
 
-        times = [time_to_seconds(ds.AcquisitionTime) for ds in dicoms]
+        times = [time_to_seconds(d.AcquisitionTime) for d in dicoms]
         diffs = np.diff(times)
-        avg_diff = np.mean(diffs)
-        return 1.0 / avg_diff, avg_diff
-    else:
-        return None, None
+        if len(diffs) > 0:
+            avg_diff = np.mean(diffs)
+            if avg_diff != 0:
+                return 1.0 / avg_diff, avg_diff
+    return None, None
 
 
 def print_all_dicom_info(path):
     """
-    Print metadata from a DICOM file or the first file in a folder.
+    Print the metadata from a DICOM file or the first file in a folder.
 
-    Parameters:
-        path (str): File or folder path.
+    Parameters
+    ----------
+    path : str
+        File or folder path to DICOM.
     """
     if os.path.isdir(path):
         dicom_files = [
@@ -68,26 +89,27 @@ def print_all_dicom_info(path):
         file = dicom_files[0]
     else:
         file = path
+
     ds = pydicom.dcmread(file)
-    print(f"Metadata for {file}:\n", ds)
+    print(f"Metadata for {file}:\n{ds}")
 
 
 def get_total_phase_encodes(folder_path):
     """
-    Determine the total number of phase encodes (full k-space phase encoding lines)
-    from the DICOM files in the given folder.
+    Determine the total number of phase-encode lines from DICOM files in a folder.
 
-    The function first looks for the "AcquisitionMatrix" attribute in a DICOM file.
-    If present and formatted as a list or tuple of four numbers, it assumes that the second
-    element corresponds to the number of phase encoding steps. If not available, it falls back
-    to the "Rows" attribute, which typically represents the image height (and hence the number
-    of phase encoding lines).
+    Tries to read the "AcquisitionMatrix" (0018,1310). If unavailable,
+    falls back to "Rows" (0028,0010).
 
-    Parameters:
-        folder_path (str): Path to the folder containing DICOM (.dcm) files.
+    Parameters
+    ----------
+    folder_path : str
+        Path to the folder containing DICOM files.
 
-    Returns:
-        int or None: The total number of phase encodes if found; otherwise, None.
+    Returns
+    -------
+    int or None
+        The total number of phase encodes, if found. Otherwise None.
     """
     dicom_files = [
         os.path.join(folder_path, f)
@@ -98,23 +120,19 @@ def get_total_phase_encodes(folder_path):
         print("No DICOM files found in the specified folder.")
         return None
 
-    # Read the first DICOM file
     try:
         ds = pydicom.dcmread(dicom_files[0])
     except Exception as e:
         print(f"Error reading DICOM file: {e}")
         return None
 
-    # Try to get the AcquisitionMatrix attribute (DICOM tag (0018,1310))
     if hasattr(ds, "AcquisitionMatrix"):
         acq_matrix = ds.AcquisitionMatrix
-        # Check if acq_matrix is a list or tuple with at least 2 elements
         if isinstance(acq_matrix, (list, tuple)) and len(acq_matrix) >= 2:
             total_phase_encodes = int(acq_matrix[1])
             print(f"Total phase encodes from AcquisitionMatrix: {total_phase_encodes}")
             return total_phase_encodes
 
-    # Fall back to the Rows attribute (which typically equals the number of phase encodes)
     if hasattr(ds, "Rows"):
         total_phase_encodes = int(ds.Rows)
         print(f"Total phase encodes from Rows attribute: {total_phase_encodes}")
@@ -126,16 +144,17 @@ def get_total_phase_encodes(folder_path):
 
 def get_num_frames(folder_path):
     """
-    Get the total number of DICOM frames (images) in the specified folder.
+    Count the number of DICOM frames (files) in the given folder.
 
-    This function lists all files with the .dcm extension in the folder and returns their count.
-    It assumes that each DICOM file corresponds to one frame.
+    Parameters
+    ----------
+    folder_path : str
+        Path to the folder containing .dcm files.
 
-    Parameters:
-        folder_path (str): Path to the folder containing DICOM (.dcm) files.
-
-    Returns:
-        int: The total number of DICOM frames, or 0 if no DICOM files are found.
+    Returns
+    -------
+    int
+        Number of DICOM frames found. 0 if none.
     """
     dicom_files = [
         os.path.join(folder_path, f)
@@ -159,15 +178,33 @@ def read_twix_file(
     keep_syncdata=True,
 ):
     """
-    Read a Siemens TWIX file using twixtools.
+    Read a Siemens TWIX (.dat) file using twixtools.
 
-    Parameters:
-        file_path (str): Path to the TWIX (.dat) file.
-        include_scans (list): List of scan numbers to include.
-        Other parameters control parsing details.
+    Parameters
+    ----------
+    file_path : str
+        Path to the TWIX file.
+    include_scans : list of int, optional
+        Specific scan numbers to include. Default is None (includes all).
+    parse_pmu : bool
+        Whether to parse PMU data.
+    parse_prot : bool
+        Whether to parse protocol.
+    parse_data : bool
+        Whether to parse the main MRI data.
+    parse_geometry : bool
+        Whether to parse geometry information.
+    verbose : bool
+        Print additional info during parsing.
+    keep_acqend : bool
+        Keep ACQEND packets in the data.
+    keep_syncdata : bool
+        Keep SYNCDATA packets in the data.
 
-    Returns:
-        list: A list of scan dictionaries.
+    Returns
+    -------
+    list
+        A list of scan dictionaries from twixtools.
     """
     scans = twixtools.read_twix(
         file_path,
@@ -186,13 +223,18 @@ def read_twix_file(
 
 def extract_image_data(scans):
     """
-    Extract and stack image (k-space) data from the scans.
+    Extract image (k-space) data from a list of TWIX scan dictionaries.
 
-    Parameters:
-        scans (list): List of scan dictionaries.
+    Parameters
+    ----------
+    scans : list of dict
+        Output from `read_twix_file`.
 
-    Returns:
-        np.ndarray: Complex k-space data with shape (phase_encodes, coils, freq_encodes).
+    Returns
+    -------
+    np.ndarray
+        Complex k-space data of shape (phase_encodes, coils, freq_encodes).
+        If no data is found, returns an empty array.
     """
     image_blocks = []
     for scan in scans:
@@ -202,8 +244,10 @@ def extract_image_data(scans):
             if mdb.is_image_scan():
                 data = np.array(mdb.data, copy=True)
                 image_blocks.append(data)
+
     if not image_blocks:
         return np.array([])
+
     out = np.stack(image_blocks, axis=0)
     print(f"Extracted image data shape: {out.shape}")
     return out
@@ -211,31 +255,41 @@ def extract_image_data(scans):
 
 def extract_iceparam_data(scans, segment_index=0, columns=None):
     """
-    Extract ICE parameter data (e.g. ECG) from image scans in a specified segment.
+    Extract ICE parameter data (e.g., ECG or other auxiliary signals) from the specified scan segment.
 
-    Parameters:
-        scans (list): List of scan dictionaries.
-        segment_index (int): Which scan segment to use.
-        columns: Columns to extract (e.g., np.s_[18:24]).
+    Parameters
+    ----------
+    scans : list of dict
+        Output from `read_twix_file`.
+    segment_index : int
+        Index of the scan segment to use.
+    columns : slice or list of int, optional
+        Columns to extract from the ICE parameter array.
 
-    Returns:
-        np.ndarray: 2D array of ICE parameters.
+    Returns
+    -------
+    np.ndarray
+        ICE parameter data. If none found, returns an empty array.
     """
     if segment_index < 0 or segment_index >= len(scans):
         print("Invalid segment index.")
         return np.array([])
+
     scan = scans[segment_index]
     ice_list = []
     if "mdb" not in scan:
         print("No mdb blocks found in segment.")
         return np.array([])
+
     for mdb in scan["mdb"]:
         if mdb.is_image_scan() and hasattr(mdb, "IceProgramPara"):
             ice_arr = np.array(mdb.IceProgramPara, copy=True)
             ice_list.append(ice_arr)
+
     if not ice_list:
         print("No ICE parameter data found.")
         return np.array([])
+
     ice_full = np.vstack(ice_list)
     if columns is not None:
         ice_full = ice_full[:, columns]

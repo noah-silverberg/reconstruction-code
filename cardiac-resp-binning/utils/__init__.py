@@ -1,12 +1,11 @@
 """
 utils package
 
-Modules:
- - data_ingestion.py: For reading TWIX and DICOM files and extracting parameters.
- - ecg.py: ECG signal processing.
- - pca.py: PCA and kernel PCA functions.
- - binning.py: Cardiac binning functions.
- - reconstruction.py: Image reconstruction functions.
- - gif.py: Visualization utilities.
- - twix.py: Functions to read TWIX files.
+This package contains various utility modules used throughout the pipeline:
+
+- data_ingestion.py : Functions to read TWIX and DICOM data
+- ecg_resp.py       : ECG and respiratory signal processing
+- binning.py        : Binning k-space by cardiac/respiratory phase
+- reconstruction.py : Direct IFFT reconstructions and conjugate symmetry
+- gif.py            : Visualization helpers for GIF creation
 """
