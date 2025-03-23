@@ -150,7 +150,7 @@ def run_pipeline(config):
         binned_data_resp = binned_data[:, resp_bin, :, :, :]
         binned_count_resp = binned_count[:, resp_bin, :]
 
-        # 2D IFFT + coil-combine with optional homodyne symmetry
+        # 2D IFFT + coil-combine with optional conjugate symmetry
         images = recon.direct_ifft_reconstruction(
             binned_data_resp,
             extended_pe_lines=extended_phase_lines,
@@ -171,7 +171,7 @@ def run_pipeline(config):
     duration = 1000 * 60 / heart_rate / num_cardiac_bins  # ms between frames
 
     for resp_bin, images in enumerate(cine_images_list):
-        gif_filename = f"homodyne_binned_cine_resp_{resp_bin}.gif"
+        gif_filename = f"binned_cine_resp_{resp_bin}.gif"
         gif.save_images_as_gif(images, gif_filename, duration=duration)
         print(f"Saved {gif_filename}")
 
