@@ -153,3 +153,57 @@ def grappa_reconstruction(kspace, calib_region, kernel_size=(5, 5)):
         recon_images_all.append(recon_img)
 
     return np.array(recon_images_all)
+
+
+def tgrappa_reconstruction(kspace, calib_size, kernel_size=(5, 5)):
+    """
+    Perform temporal GRAPPA (tGRAPPA) reconstruction on cine data using pygrappa.tgrappa.
+    tGRAPPA uses temporal redundancy to reconstruct undersampled data.
+
+    Parameters
+    ----------
+    kspace : np.ndarray
+        Undersampled k-space data of shape (n_frames, n_phase_encodes, n_coils, n_freq_encodes).
+    calib_size : tuple
+        A two-element tuple (calib_phase, calib_freq) that defines the size of the calibration region.
+        tGRAPPA will construct the ACS (autocalibration signals) from the temporal center.
+    kernel_size : tuple, optional
+        Size of the GRAPPA kernel (default is (5, 5)).
+
+    Returns
+    -------
+    np.ndarray
+        Reconstructed magnitude images of shape (n_frames, n_phase_encodes, n_freq_encodes).
+    """
+    # Rearrange kspace to put time (frames) in the last dimension.
+    # Original shape: (n_frames, n_phase, n_coils, n_freq)
+    # Rearranged shape: (n_phase, n_freq, n_coils, n_frames)
+    kspace_rearr = np.transpose(kspace, (1, 3, 2, 0))
+
+    # Call tGRAPPA.
+    # Here, coil_axis=-2 indicates that the coils are in the second-to-last dimension,
+    # and time_axis=-1 indicates that the last dimension is time.
+    recon_kspace = pygrappa.tgrappa(
+        kspace_rearr,
+        calib_size=calib_size,
+        kernel_size=kernel_size,
+        coil_axis=-2,
+        time_axis=-1,
+    )
+
+    # Rearrange the reconstructed k-space back to original order:
+    # New shape: (n_frames, n_phase, n_coils, n_freq)
+    recon_kspace = np.transpose(recon_kspace, (3, 0, 2, 1))
+
+    # Perform inverse FFT on each frame and combine coils using sum-of-squares.
+    n_frames, n_phase, n_coils, n_freq = recon_kspace.shape
+    recon_images = np.zeros((n_frames, n_phase, n_freq), dtype=np.float64)
+    for i in range(n_frames):
+        coil_imgs = []
+        for ch in range(n_coils):
+            img = np.fft.ifft2(recon_kspace[i, :, ch, :])
+            img = np.fft.fftshift(img)
+            coil_imgs.append(img)
+        coil_imgs = np.array(coil_imgs)
+        recon_images[i] = np.sqrt(np.sum(np.abs(coil_imgs) ** 2, axis=0))
+    return recon_images

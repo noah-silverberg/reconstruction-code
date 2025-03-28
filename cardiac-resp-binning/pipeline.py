@@ -153,20 +153,20 @@ def run_pipeline(config):
         recon_method = config["processing"].get("reconstruction_method", "zf").lower()
 
         if recon_method == "grappa":
-            # Retrieve GRAPPA-specific parameters from configuration.
             calib_region = tuple(config["processing"].get("calib_region", [30, 50]))
-            acceleration = config["processing"].get(
-                "acceleration", 2
-            )  # may be used in options
             kernel_size = tuple(config["processing"].get("kernel_size", [5, 5]))
-            grappa_options = {"acceleration": acceleration}  # extend as needed
-
             images = recon.grappa_reconstruction(
                 binned_data_resp,
                 calib_region=calib_region,
                 kernel_size=kernel_size,
             )
-        elif recon_method in ["zf", "conj_symm"]:  # Zero-filling or Conjugate symmetry
+        elif recon_method == "tgrappa":
+            calib_size = tuple(config["processing"].get("calib_size", [20, 20]))
+            kernel_size = tuple(config["processing"].get("kernel_size", [5, 5]))
+            images = recon.tgrappa_reconstruction(
+                binned_data_resp, calib_size=calib_size, kernel_size=kernel_size
+            )
+        elif recon_method in ["zf", "conj_symm"]:
             images = recon.direct_ifft_reconstruction(
                 binned_data_resp,
                 extended_pe_lines=extended_phase_lines,
