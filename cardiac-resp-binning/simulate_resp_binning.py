@@ -16,6 +16,7 @@ import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import matplotlib.colors as mcolors
 
 # Local imports (adjust if your utils package is differently named)
 import utils.data_ingestion as di
@@ -127,7 +128,13 @@ def plot_kspace_bins(kspace_array, title_prefix, vmin=0, vmax=None):
         ax_ = axs[r_, c_]
 
         img = kspace_array[b_]
-        im = ax_.imshow(img, cmap="gray", vmin=vmin, vmax=vmax)
+        im = ax_.imshow(
+            img,
+            cmap="gray",
+            # Use a PowerNorm with gamma<1 so that small nonzero values appear bright,
+            # and high values are compressed. You can tweak gamma=0.3, 0.5, etc.
+            norm=mcolors.PowerNorm(gamma=0.3, vmin=0, vmax=vmax),
+        )
         # Optionally add a colorbar here:
         plt.colorbar(im, ax=ax_)
         ax_.set_title(f"{title_prefix} Bin {b_}")
@@ -138,10 +145,6 @@ def plot_kspace_bins(kspace_array, title_prefix, vmin=0, vmax=None):
         r_ = i_ // cols
         c_ = i_ % cols
         axs[r_, c_].axis("off")
-
-    # # Single colorbar for this figure (optional)
-    # if im is not None:
-    #     fig.colorbar(im, ax=axs.ravel().tolist())
 
     fig.suptitle(f"{title_prefix} K-Spaces")
     fig.tight_layout()
@@ -171,7 +174,7 @@ NUM_TOTAL_BINS = 4
 KSPACE_H = 128  # "rows"
 KSPACE_W = 128  # "columns"
 
-DOWNSAMPLE_FACTOR = 5  # e.g., if you want to downsample the k-space
+DOWNSAMPLE_FACTOR = 1  # e.g., if you want to downsample the k-space
 
 ##############################################################################
 # END OF MAIN PARAMETERS

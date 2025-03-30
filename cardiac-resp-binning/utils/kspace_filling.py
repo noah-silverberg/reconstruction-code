@@ -31,7 +31,13 @@ def build_line_priority(num_bins, kspace_height=128):
         for row_idx in range(kspace_height):
             distance_from_center = abs(row_idx - center_index)
             # Example formula: the closer to center, the higher the priority.
-            base_priority = 300 - (distance_from_center * 2)
+            base_priority = np.exp(
+                -0.5 * (distance_from_center / (kspace_height / 4)) ** 5
+            )
+            # TODO: something we need to think about here is the fact that when we highly weight a vote from a neighboring bin
+            #       we might overfill a line
+            #       for example if we have a line acquired in bin 0 but it is really highly weighted by bin 1, we will keep acquiring this row repeatedly, since the priority won't even be updated in the neiboring bin
+            #       we might want to add a small penalty to the priority of the line in the neighboring bin
             priority_array[bin_idx, row_idx] = base_priority
 
     return priority_array
@@ -59,16 +65,13 @@ def fill_line_in_bin(bin_index, row_index, fill_array, priority_array):
         Shape = (num_bins, kspace_height). Priority values for each bin and row.
     """
     fill_array[bin_index, row_index, :] += 1.0  # Indicate line is filled
-    priority_array[bin_index, row_index] = (
-        -999999
-    )  # Force priority negative to skip next time
+    priority_array[bin_index, row_index] *= 0.8  # Reduce priority for this line
 
-    # Identify the conjugate line index
-    conj_row_index = fill_array.shape[1] - 1 - row_index
-
-    # If the conjugate line in this bin is unfilled, add a small bonus
-    if fill_array[bin_index, conj_row_index, 0] == 0.0:
-        priority_array[bin_index, conj_row_index] += 20
+    # TODO: add some sort of prioritization based on the GRAPPA/tGRAPPA lines needed
+    # so something that maybe prioritizes lines with no nearby acquired lines
+    # this requires some more thought, or maybe numerical simulation to determine sensitivities
+    #     of the final image to the rows acquired
+    # this might be quite difficult though given that GRAPPA/tGRAPPA (I think) aren't linear like FFT
 
 
 def get_bin_index_gaussian(
@@ -78,148 +81,97 @@ def get_bin_index_gaussian(
     num_exhale_bins,
     use_total_bins=False,
     num_total_bins=4,
+    sigma_factor=0.1,
 ):
     """
-    Compute "voting weights" for each bin based on how close the fraction is
-    to the center of that bin, using a Gaussian weighting scheme.
+    Compute voting weights for each bin based on the minimum distance between a given
+    respiratory fraction and each bin's boundaries, with wrap-around and phase adjustment.
 
-    By returning a dictionary {bin_idx: weight}, we can see that bins near the fraction
-    get higher weights, and bins far from it get lower (or zero).
+    The predicted fraction is first remapped depending on the phase:
+      - If is_inhale is True, effective_fraction = fraction * 0.5    (range 0-50)
+      - Otherwise, effective_fraction = 50 + fraction * 0.5             (range 50-100)
+    This way, a 99% inhalation value (i.e. near the end of inhalation) is close to 50,
+    while a 99% exhalation value remains high.
+
+    Then, the respiratory cycle (0–100) is divided evenly into bins. For each bin,
+    we compute the minimal (cyclic) distance from the effective_fraction to the bin’s boundaries.
+    A Gaussian weight is computed as:
+
+        weight = exp(-0.5 * (d_min / sigma)^2)
+
+    where sigma = bin_width * sigma_factor. Finally, the weights are normalized to sum to 1.
 
     Parameters
     ----------
     fraction : float
-        The prospective fraction (0..100) we estimated for this time sample.
+        The predicted respiratory fraction (0..100) for the time sample.
     is_inhale : bool
-        True if we believe we are in inhalation, False for exhalation.
+        True if the current phase is inhalation, False if exhalation.
     num_inhale_bins : int
-        Number of inhalation bins (if separate).
+        Number of bins designated for inhalation (if not using total bins).
     num_exhale_bins : int
-        Number of exhalation bins (if separate).
-    use_total_bins : bool
-        Whether to treat all bins (inhalation + exhalation) as one contiguous block (0..num_total_bins-1).
-    num_total_bins : int
-        If use_total_bins==True, how many total bins do we have?
+        Number of bins designated for exhalation (if not using total bins).
+    use_total_bins : bool, optional
+        If True, treat the entire cycle as one contiguous block of bins.
+    num_total_bins : int, optional
+        Total number of bins if use_total_bins is True.
+    sigma_factor : float, optional
+        Factor (multiplied by bin width) to set sigma in the Gaussian weighting. Default is 0.3.
 
     Returns
     -------
     dict
-        A dictionary mapping bin_index -> weight (floats). Bins with no assignment
-        might not appear in the dict, or might be zero if they are very far.
+        A dictionary mapping each bin index to its normalized weight.
     """
-    # If using a single contiguous set of bins (the "total bins" approach):
+    # Determine total number of bins
     if use_total_bins:
-        bin_count = num_total_bins
-        bin_width = 100.0 / bin_count
-        # Hard find which bin the fraction is “closest” to
-        bin_idx = int(np.floor(fraction / bin_width))
-        if bin_idx >= bin_count:
-            bin_idx = bin_count - 1
-
-        weights_dict = {}
-        center_of_bin = (bin_idx + 0.5) * bin_width
-        dist = abs(fraction - center_of_bin)
-        sigma = bin_width * 0.3
-        main_weight = np.exp(-0.5 * (dist / sigma) ** 2)
-        weights_dict[bin_idx] = main_weight
-
-        # Possibly also assign small weights to neighboring bins
-        for neighbor in [bin_idx - 1, bin_idx + 1]:
-            if 0 <= neighbor < bin_count:
-                c2 = (neighbor + 0.5) * bin_width
-                d2 = abs(fraction - c2)
-                w2 = np.exp(-0.5 * (d2 / sigma) ** 2)
-                if w2 > 1e-4:
-                    weights_dict[neighbor] = w2
-
-        # Normalize
-        sum_w = sum(weights_dict.values())
-        if sum_w < 1e-8:
-            # If numeric issues => just assign all to bin_idx
-            weights_dict = {bin_idx: 1.0}
-        else:
-            for k in weights_dict.keys():
-                weights_dict[k] /= sum_w
-
-        return weights_dict
-
+        total_bins = num_total_bins
     else:
-        # If we keep inhalation bins and exhalation bins separate
-        # Step 1) figure out if we are in inhalation or exhalation from is_inhale.
-        if is_inhale:
-            # Distribute across inhalation bins only
-            bin_count_inh = num_inhale_bins
-            bin_width = 100.0 / bin_count_inh
+        total_bins = num_inhale_bins + num_exhale_bins
 
-            bin_idx = int(np.floor(fraction / bin_width))
-            if bin_idx >= bin_count_inh:
-                bin_idx = bin_count_inh - 1
+    # Remap fraction based on phase:
+    # - For inhalation, scale fraction into [0, 50]
+    # - For exhalation, scale fraction into [50, 100]
+    if is_inhale:
+        effective_fraction = fraction * 0.5
+    else:
+        effective_fraction = 50 + fraction * 0.5
 
-            # Build a dict for these bins
-            weights_inh = {}
-            center_of_bin = (bin_idx + 0.5) * bin_width
-            dist = abs(fraction - center_of_bin)
-            sigma = bin_width * 0.3
-            main_weight = np.exp(-0.5 * (dist / sigma) ** 2)
-            weights_inh[bin_idx] = main_weight
+    bin_width = 100.0 / total_bins
+    sigma = bin_width * sigma_factor  # adjustable spread
 
-            for neighbor in [bin_idx - 1, bin_idx + 1]:
-                if 0 <= neighbor < bin_count_inh:
-                    c2 = (neighbor + 0.5) * bin_width
-                    d2 = abs(fraction - c2)
-                    w2 = np.exp(-0.5 * (d2 / sigma) ** 2)
-                    if w2 > 1e-4:
-                        weights_inh[neighbor] = w2
+    weights = {}
 
-            sum_w = sum(weights_inh.values())
-            if sum_w < 1e-8:
-                weights_inh = {bin_idx: 1.0}
-            else:
-                for k in weights_inh.keys():
-                    weights_inh[k] /= sum_w
+    # Loop over every bin and compute the minimal cyclic distance to its boundaries.
+    for bin_idx in range(total_bins):
+        bin_start = bin_idx * bin_width
+        bin_end = (bin_idx + 1) * bin_width
 
-            # The inhalation bins are 0..(num_inhale_bins-1).
-            # Return as a dictionary {bin_idx: weight}
-            return weights_inh
-
+        # Because the cycle is circular, the distance d_min is the minimum distance
+        # from effective_fraction to either boundary, considering wrap-around.
+        if bin_start <= effective_fraction < bin_end:
+            d_min = 0.0  # fraction lies inside the bin
         else:
-            # Exhalation bins
-            bin_count_exh = num_exhale_bins
-            bin_width = 100.0 / bin_count_exh
-            bin_idx = int(np.floor(fraction / bin_width))
-            if bin_idx >= bin_count_exh:
-                bin_idx = bin_count_exh - 1
+            # Compute distance to bin_start and bin_end, with wrap-around adjustment:
+            diff_start = abs(effective_fraction - bin_start)
+            diff_end = abs(effective_fraction - bin_end)
+            # Wrap-around: e.g., distance between 99 and 2 is min( |99-2|, 100-|99-2| )
+            diff_start = min(diff_start, 100 - diff_start)
+            diff_end = min(diff_end, 100 - diff_end)
+            d_min = min(diff_start, diff_end)
 
-            weights_exh = {}
-            center_of_bin = (bin_idx + 0.5) * bin_width
-            dist = abs(fraction - center_of_bin)
-            sigma = bin_width * 0.3
-            main_weight = np.exp(-0.5 * (dist / sigma) ** 2)
-            weights_exh[bin_idx] = main_weight
+        # Compute the Gaussian weight for this bin:
+        weight = np.exp(-0.5 * (d_min / sigma) ** 2)
+        weights[bin_idx] = weight
 
-            for neighbor in [bin_idx - 1, bin_idx + 1]:
-                if 0 <= neighbor < bin_count_exh:
-                    c2 = (neighbor + 0.5) * bin_width
-                    d2 = abs(fraction - c2)
-                    w2 = np.exp(-0.5 * (d2 / sigma) ** 2)
-                    if w2 > 1e-4:
-                        weights_exh[neighbor] = w2
+    # Normalize the weights so that they sum to 1.
+    total_weight = sum(weights.values())
+    if total_weight < 1e-8:
+        normalized_weights = {i: 1.0 / total_bins for i in range(total_bins)}
+    else:
+        normalized_weights = {i: w / total_weight for i, w in weights.items()}
 
-            sum_w = sum(weights_exh.values())
-            if sum_w < 1e-8:
-                weights_exh = {bin_idx: 1.0}
-            else:
-                for k in weights_exh.keys():
-                    weights_exh[k] /= sum_w
-
-            # These exhalation bins are offset by the # of inhale bins
-            # e.g. if inhalation bins = 2, exhalation bins start at index 2, 3, ...
-            # So we shift them accordingly
-            shifted_dict = {}
-            for b_ in weights_exh.keys():
-                new_index = b_ + num_inhale_bins
-                shifted_dict[new_index] = weights_exh[b_]
-            return shifted_dict
+    return normalized_weights
 
 
 def shift_inhale_exhale_bins(bin_dict, is_inhale, num_inhale_bins):
