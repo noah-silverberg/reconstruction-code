@@ -24,6 +24,7 @@ from utils.ecg_resp import detect_resp_peaks
 from utils.kspace_filling import (
     build_line_priority,
     prospective_fill_loop,
+    get_bin_index_gaussian,
     assign_prospective_bin,
 )
 from scipy import signal
@@ -221,23 +222,13 @@ def main():
 
     pros_fill = np.zeros((total_bins, KSPACE_H, KSPACE_W), dtype=float)
 
-    # Build a line-priority array
-    pros_priority = np.zeros((total_bins, KSPACE_H), dtype=float)
-
-    # Example approach: center-based priority (like your code does).
-    # We'll replicate that logic directly:
-    center = KSPACE_H // 2
-    for b_ in range(total_bins):
-        for r in range(KSPACE_H):
-            dist = abs(r - center)
-            base = 300 - dist * 2
-            pros_priority[b_, r] = base
+    pros_priority = build_line_priority(total_bins, kspace_height=KSPACE_H)
 
     # 6) Define a local function to get bin_index with Gaussian weighting
     #    or you can import from kspace_filling if you like. For example:
     from functools import partial
-    from utils.kspace_filling import get_bin_index_gaussian, fill_line_in_bin
 
+    # Build the partial for get_bin_index_gaussian
     get_bin_index_fn = partial(
         get_bin_index_gaussian,
         num_inhale_bins=NUM_INHALE_BINS,
@@ -246,59 +237,25 @@ def main():
         num_total_bins=NUM_TOTAL_BINS,
     )
 
-    # 7) We do a prospective fill loop
-    acquired_lines = [None] * N
+    # Build the partial for assign_prospective_bin
+    assign_bin_fn = partial(
+        assign_prospective_bin,
+        num_inhale_bins=NUM_INHALE_BINS,
+        num_exhale_bins=NUM_EXHALE_BINS,
+        use_total_bins=USE_TOTAL_BINS_INSTEAD,
+        num_total_bins=NUM_TOTAL_BINS,
+    )
 
-    for k in range(N):
-        frac = predicted_fraction[k]
-        ph = predicted_phase[k]
-        if np.isnan(frac) or ph is None:
-            continue
-
-        # Bin weighting dictionary => {bin_idx: weight}
-        bin_weight = get_bin_index_fn(fraction=frac, is_inhale=ph)
-
-        # For each bin => find top row => compute score = bin_weight * priority
-        top_candidates = {}
-        for b_ in bin_weight.keys():
-            w_ = bin_weight[b_]
-            if w_ < 1e-6:
-                continue
-            row_argmax = np.argmax(pros_priority[b_])
-            val = pros_priority[b_, row_argmax]
-            if val < 0:
-                continue
-            score = w_ * val
-            top_candidates[b_] = (row_argmax, score)
-
-        if not top_candidates:
-            continue
-
-        # pick the bin with highest "score"
-        best_bin = max(top_candidates.keys(), key=lambda x: top_candidates[x][1])
-        best_row = top_candidates[best_bin][0]
-
-        # prospective bin (hard assignment based on fraction)
-        pbin = assign_prospective_bin(
-            fraction=frac,
-            is_inhale=ph,
-            num_inhale_bins=NUM_INHALE_BINS,
-            num_exhale_bins=NUM_EXHALE_BINS,
-            use_total_bins=USE_TOTAL_BINS_INSTEAD,
-            num_total_bins=NUM_TOTAL_BINS,
-        )
-
-        # store the acquired line
-        acquired_lines[k] = (best_row, pbin)
-
-        # fill that row in pros_fill
-        pros_fill[pbin, best_row, :] += 1.0
-
-        # update the priority so we don't pick this row again
-        pros_priority[pbin, best_row] = -999999
-        conj_row = KSPACE_H - 1 - best_row
-        if pros_fill[pbin, conj_row, 0] == 0.0:
-            pros_priority[pbin, conj_row] += 20
+    # Now just call prospective_fill_loop
+    acquired_lines = prospective_fill_loop(
+        N=len(resp_data),
+        predicted_fraction=predicted_fraction,
+        predicted_phase=predicted_phase,
+        pros_fill=pros_fill,
+        pros_priority=pros_priority,
+        get_bin_index_fn=get_bin_index_fn,
+        assign_bin_fn=assign_bin_fn,
+    )
 
     # 8) Retrospective assignment:
     #    a) detect final peaks & troughs on the entire signal
