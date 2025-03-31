@@ -20,6 +20,7 @@ import utils.ecg_resp as ecg_resp
 import utils.resp_fractions as rf
 import utils.kspace_filling as kf
 from scipy import signal
+import matplotlib.colors as mcolors
 
 # We'll use the same GIF utilities as in your other scripts
 import utils.gif as gif
@@ -128,35 +129,51 @@ def main():
     )
 
     print("Done with prospective joint binning!")
-    # ---------------------------------------------------------
-    # BELOW is the new code that generates the k-space GIFs
-    # ---------------------------------------------------------
 
-    # Each respiratory bin becomes one GIF. The "frames" in that GIF are the cardiac bins.
-    # shape of pros_fill_joint: (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W)
+    # ---------------------------------------------------------------------
+    # Create subplot figures of the prospective fill bins, similar in style
+    # to what simulate_resp_binning.py does, but for joint (resp x card).
+    # ---------------------------------------------------------------------
 
-    # We'll pick a frame duration in ms, e.g. 300 ms between frames
-    frame_duration_ms = 300
+    # shape => (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W)
+    # We'll find a global max so the color scale is consistent across bins:
+    global_max = pros_fill_joint.max()
+    if global_max < 1e-9:
+        global_max = 1.0  # avoid divide-by-zero if array is all zeros
 
     for rbin in range(num_resp_bins):
-        # Extract [card_bin, row, col]
-        kspace_2dstack = pros_fill_joint[
-            rbin
-        ]  # shape => (NUM_CARD_BINS, KSPACE_H, KSPACE_W)
-
-        # Our "save_kspace_as_gif" expects a 4D array: (num_frames, n_rows, n_coils, n_readout).
-        # So we add a dummy "coil" dimension of size 1.
-        # shape => (NUM_CARD_BINS, KSPACE_H, 1, KSPACE_W)
-        kspace_for_gif = np.expand_dims(kspace_2dstack, axis=2)
-
-        outname = f"joint_prospective_rbin_{rbin}.gif"
-        gif.save_kspace_as_gif(
-            kspace_for_gif, filename=outname, duration=frame_duration_ms, cmap="gray"
+        fig, axs = plt.subplots(
+            1, NUM_CARD_BINS, figsize=(4 * NUM_CARD_BINS, 4), sharex=True, sharey=True
         )
-        print(f"Saved GIF for respiratory bin {rbin} => {outname}")
+        # If there's only 1 cardiac bin, axs might not be a list
+        if NUM_CARD_BINS == 1:
+            axs = [axs]
 
-    # Optionally, you could also do a difference map or a retrospective fill, etc.,
-    # but for now we've shown how to produce the "k-space as GIF" per respiratory bin.
+        for cbin in range(NUM_CARD_BINS):
+            # 2D array of that (rbin, cbin)
+            kspace_2d = pros_fill_joint[rbin, cbin]
+
+            # We'll use a power norm so small but non-zero values are visible
+            im = axs[cbin].imshow(
+                kspace_2d,
+                cmap="gray",
+                norm=mcolors.PowerNorm(gamma=0.3, vmin=0, vmax=global_max),
+                origin="upper",
+                aspect="auto",
+            )
+            axs[cbin].set_title(f"Resp bin {rbin}, Card bin {cbin}", fontsize=10)
+            axs[cbin].axis("off")
+            # Add a colorbar specific to this subplot
+            cbar = plt.colorbar(im, ax=axs[cbin], fraction=0.046, pad=0.04)
+            cbar.set_label("Magnitude")
+
+        fig.suptitle(f"Joint Prospective Fill: Respiratory Bin {rbin}", fontsize=14)
+        fig.tight_layout()
+
+        out_png = f"joint_prospective_rbin_{rbin}_subplots.png"
+        plt.savefig(out_png, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved subplot figure for respiratory bin {rbin} => {out_png}")
 
 
 if __name__ == "__main__":
