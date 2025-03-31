@@ -1,6 +1,7 @@
 # utils/resp_fractions.py
 
 import numpy as np
+from tqdm import tqdm
 from .ecg_resp import detect_resp_peaks
 
 
@@ -249,3 +250,114 @@ def predict_fraction(
         predicted_fraction[k] = frac_val
 
     return predicted_fraction, predicted_phase, calibration_end_idx
+
+
+def predict_cardiac_fraction(
+    ecg_signal, fs, min_calib_time=5.0, peak_height=0.5, peak_prom=0.2
+):
+    """
+    Compute a 'cardiac fraction' 0..100% at each sample index, simulating
+    a prospective approach for the heart cycle.
+
+    The logic is simpler than respiration:
+      1) We detect R-peaks on partial data up to time k.
+      2) Once we have at least 2 stable R-R intervals AND min_calib_time has elapsed,
+         we treat it as 'calibrated' and start outputting fraction 0..100.
+      3) fraction = 100 * (k - last_R) / (next_R - last_R)
+         if we actually know next_R; if not sure, fraction = 0 or last known.
+
+    If we haven't calibrated yet, fraction = NaN.
+
+    Parameters
+    ----------
+    ecg_signal : np.ndarray
+        1D array, raw or preprocessed ECG.
+    fs : float
+        Sampling frequency in Hz.
+    min_calib_time : float
+        Minimum time in seconds required before we trust the R-R intervals.
+    peak_height : float
+        Minimum peak height for R-peak detection (passed to scipy find_peaks).
+    peak_prom : float
+        Minimum peak prominence for R-peak detection.
+
+    Returns
+    -------
+    cardiac_fraction : np.ndarray
+        Length N. The fraction 0..100 for each time step, or NaN if not calibrated yet.
+    calibration_end_idx : int or None
+        The sample index at which calibration was declared finished.
+    """
+    from .ecg_resp import detect_r_peaks  # in the same folder
+
+    N = len(ecg_signal)
+    cardiac_fraction = np.full(N, np.nan)
+
+    # We will store R-peaks as we detect them
+    r_peaks = []
+    calibration_done = False
+    calibration_end_idx = None
+
+    # A small function to estimate next R-peak from average of last R-R intervals
+    def estimate_next_rpeak(r_peaks_local, fs):
+        # We'll average the last 2 or 3 intervals
+        if len(r_peaks_local) < 2:
+            return None
+        intervals = np.diff(r_peaks_local[-3:])  # up to last 3 intervals
+        avg_interval = np.mean(intervals) if len(intervals) > 0 else None
+        if avg_interval is None or avg_interval < 1:
+            return None
+        return r_peaks_local[-1] + avg_interval
+
+    # Main loop: simulate real-time
+    for k in tqdm(range(N), desc="Processing ECG signal"):
+        if k / fs < min_calib_time:
+            # Not enough time has passed => skip
+            continue
+
+        # partial ecg up to sample k
+        partial_ecg = ecg_signal[: k + 1]
+
+        # detect R-peaks on partial data
+        # (We do single-channel, so we take the first array from detect_r_peaks.)
+        r_peaks_list = detect_r_peaks(partial_ecg.reshape(-1, 1), fs)
+        if len(r_peaks_list) > 0:
+            r_peaks = r_peaks_list[0]
+        else:
+            r_peaks = []
+
+        # once we have at least 2 R-R intervals => calibrate
+        if (not calibration_done) and len(r_peaks) >= 3:
+            calibration_done = True
+            calibration_end_idx = k
+
+        if not calibration_done or len(r_peaks) < 2:
+            # Not calibrated => fraction = NaN
+            continue
+
+        # Identify last R, next R
+        #   we want: r_peaks[-1] is definitely behind k, so let's check
+        # Actually we see how many peaks are behind k
+        behind_rpeaks = r_peaks[r_peaks <= k]
+        if len(behind_rpeaks) == 0:
+            continue
+        last_r = behind_rpeaks[-1]
+
+        # either we find the next actual R if it exists
+        ahead_rpeaks = r_peaks[r_peaks > k]
+        if len(ahead_rpeaks) > 0:
+            next_r = ahead_rpeaks[0]
+        else:
+            # if none, guess from average of last intervals
+            next_r = estimate_next_rpeak(r_peaks, fs)
+
+        if (next_r is None) or (next_r <= last_r):
+            # can't do fraction
+            continue
+
+        cycle_length = next_r - last_r
+        frac_val = 100.0 * (k - last_r) / cycle_length
+        frac_val = max(0, min(100, frac_val))
+        cardiac_fraction[k] = frac_val
+
+    return cardiac_fraction, calibration_end_idx

@@ -1,6 +1,7 @@
 # utils/kspace_filling.py
 
 import numpy as np
+from tqdm import tqdm
 
 
 def build_line_priority(num_bins, kspace_height=128):
@@ -353,5 +354,246 @@ def prospective_fill_loop(
 
         # 5) fill that line
         fill_line_in_bin(pbin, best_row, pros_fill, pros_priority)
+
+    return acquired_lines
+
+
+def build_line_priority_joint(num_resp_bins, num_card_bins, kspace_height=128):
+    """
+    Build a priority array of shape (num_resp_bins, num_card_bins, kspace_height).
+    We do the same center-priority logic you used for respiration alone,
+    but repeated for each (resp_bin, card_bin).
+    """
+    center_index = kspace_height // 2
+    priority_array = np.zeros(
+        (num_resp_bins, num_card_bins, kspace_height), dtype=float
+    )
+
+    for rbin in range(num_resp_bins):
+        for cbin in range(num_card_bins):
+            for row_idx in range(kspace_height):
+                distance_from_center = abs(row_idx - center_index)
+                base_priority = np.exp(
+                    -0.5 * (distance_from_center / (kspace_height / 4)) ** 5
+                )
+                priority_array[rbin, cbin, row_idx] = base_priority
+
+    return priority_array
+
+
+def get_joint_bin_weights_gaussian(
+    resp_fraction,
+    resp_is_inhale,
+    cardiac_fraction,
+    num_inhale_bins,
+    num_exhale_bins,
+    use_total_resp_bins,
+    num_total_resp_bins,
+    num_card_bins,
+    resp_sigma_factor=0.1,
+    card_sigma_factor=0.1,
+):
+    """
+    Return a dict keyed by (resp_bin, card_bin) => combined_weight.
+
+    Approach:
+      - First get the 1D weights for respiration: w_r(resp_bin)
+      - Then get the 1D weights for cardiac: w_c(card_bin)
+      - Then the joint weight for (rbin, cbin) is w_r(rbin) * w_c(cbin)
+
+    You can use your existing get_bin_index_gaussian for respiration, plus
+    a new get_bin_index_gaussian for the cardiac fraction, or do it inline.
+
+    For clarity, let's just reuse your 'get_bin_index_gaussian' for both.
+    We'll define a small function get_1d_weights(...) for each cycle.
+    """
+    # Reuse your existing single-cycle weighting for respiration
+    from .kspace_filling import get_bin_index_gaussian
+
+    # Get the respiration bin->weight
+    resp_bin_weights = get_bin_index_gaussian(
+        fraction=resp_fraction,
+        is_inhale=resp_is_inhale,
+        num_inhale_bins=num_inhale_bins,
+        num_exhale_bins=num_exhale_bins,
+        use_total_bins=use_total_resp_bins,
+        num_total_bins=num_total_resp_bins,
+        sigma_factor=resp_sigma_factor,
+    )  # returns {resp_bin => weight}
+
+    # For cardiac, we do a similar approach but simpler: is_inhale doesn't apply, so pass is_inhale=False
+    # Or you can define a new function that doesn't consider inhale/exhale. We'll just do the same method but we
+    # treat the entire 0..100 as a single contiguous range with 'num_card_bins'.
+    # Something like:
+    card_bin_weights = {}
+    if num_card_bins <= 1:
+        # trivial
+        card_bin_weights[0] = 1.0
+    else:
+        # We'll do a bin_width of 100 / num_card_bins, then do a Gaussian weighting similarly
+        # This is basically the same code as get_bin_index_gaussian, but ignoring inhale/exhale.
+        bin_width = 100.0 / num_card_bins
+        sigma = bin_width * card_sigma_factor
+        raw_weights = {}
+        for cbin in range(num_card_bins):
+            c_start = cbin * bin_width
+            c_end = (cbin + 1) * bin_width
+            # distance from fraction to bin boundaries
+            if c_start <= cardiac_fraction < c_end:
+                d_min = 0.0
+            else:
+                diff_start = abs(cardiac_fraction - c_start)
+                diff_end = abs(cardiac_fraction - c_end)
+                diff_start = min(diff_start, 100 - diff_start)
+                diff_end = min(diff_end, 100 - diff_end)
+                d_min = min(diff_start, diff_end)
+            w_ = np.exp(-0.5 * (d_min / sigma) ** 2)
+            raw_weights[cbin] = w_
+        s_ = sum(raw_weights.values())
+        if s_ < 1e-9:
+            for cbin in raw_weights:
+                card_bin_weights[cbin] = 1.0 / num_card_bins
+        else:
+            for cbin in raw_weights:
+                card_bin_weights[cbin] = raw_weights[cbin] / s_
+
+    # Now combine
+    joint_weights = {}
+    for rbin, w_r in resp_bin_weights.items():
+        for cbin, w_c in card_bin_weights.items():
+            joint_weights[(rbin, cbin)] = w_r * w_c
+
+    return joint_weights
+
+
+def assign_prospective_bin_joint(
+    resp_fraction,
+    resp_is_inhale,
+    cardiac_fraction,
+    num_inhale_bins,
+    num_exhale_bins,
+    use_total_resp_bins,
+    num_total_resp_bins,
+    num_card_bins,
+):
+    """
+    Return a single (resp_bin, card_bin) for prospective assignment.
+
+    We do a normal assign for respiration, then a normal assign for cardiac.
+    """
+    from .kspace_filling import assign_prospective_bin
+
+    # For respiration:
+    rbin = assign_prospective_bin(
+        fraction=resp_fraction,
+        is_inhale=resp_is_inhale,
+        num_inhale_bins=num_inhale_bins,
+        num_exhale_bins=num_exhale_bins,
+        use_total_bins=use_total_resp_bins,
+        num_total_bins=num_total_resp_bins,
+    )
+
+    # For cardiac, do an equivalent approach but ignoring inhale/exhale
+    # We can define a small helper here:
+    if num_card_bins <= 1:
+        cbin = 0
+    else:
+        bin_width = 100.0 / num_card_bins
+        cbin = int(np.floor(cardiac_fraction / bin_width))
+        if cbin >= num_card_bins:
+            cbin = num_card_bins - 1
+
+    return (rbin, cbin)
+
+
+def fill_line_in_joint_bin(rbin, cbin, row_idx, fill_array, priority_array):
+    """
+    Mark that we have acquired line `row_idx` in bin (rbin, cbin).
+    Then reduce its priority so we don't keep acquiring it.
+    """
+    fill_array[rbin, cbin, row_idx, :] += 1.0  # or set to 1, your choice
+    # reduce priority (like you do in fill_line_in_bin)
+    priority_array[rbin, cbin, row_idx] *= 0.8
+
+
+def prospective_fill_loop_joint(
+    N,
+    resp_fraction_array,
+    resp_phase_array,
+    cardiac_fraction_array,
+    pros_fill,
+    pros_priority,
+    get_joint_weights_fn,
+    assign_bin_joint_fn,
+):
+    """
+    Like prospective_fill_loop but for joint (resp, card) bins.
+
+    Parameters
+    ----------
+    N : int
+        Number of time steps.
+    resp_fraction_array : np.ndarray
+        (N,) of respiratory fraction 0..100 or NaN if unknown.
+    resp_phase_array : np.ndarray of bool or None
+        True = inhalation, False = exhalation, or None if unknown.
+    cardiac_fraction_array : np.ndarray
+        (N,) 0..100 or NaN if not calibrated.
+    pros_fill : np.ndarray
+        shape (num_resp_bins, num_card_bins, kspace_height, kspace_width).
+    pros_priority : np.ndarray
+        shape (num_resp_bins, num_card_bins, kspace_height).
+    get_joint_weights_fn : callable
+        e.g. partial(get_joint_bin_weights_gaussian, ...) returns dict {(rbin,cbin)->weight}.
+    assign_bin_joint_fn : callable
+        picks a single (rbin,cbin) for the prospective assignment.
+
+    Returns
+    -------
+    list
+      length N, each is None or (row_idx, rbin, cbin).
+    """
+    acquired_lines = [None] * N
+    num_resp_bins, num_card_bins, kspace_height, kspace_width = pros_fill.shape
+
+    for k in tqdm(range(N), desc="Prospective Filling"):
+        resp_frac = resp_fraction_array[k]
+        resp_ph = resp_phase_array[k]  # True/False
+        card_frac = cardiac_fraction_array[k]
+        if np.isnan(resp_frac) or resp_ph is None or np.isnan(card_frac):
+            continue  # no fill
+
+        # 1) get the dictionary of combined weights
+        joint_weights = get_joint_weights_fn(resp_frac, resp_ph, card_frac)
+
+        row_scores = np.zeros(kspace_height, dtype=float)
+
+        for (rbin, cbin), w_ in joint_weights.items():
+            if w_ < 1e-8:
+                continue
+            # For each row, accumulate w_ * priority
+            # so row_scores[row] += (w_ * pros_priority[rbin, cbin, row])
+            row_scores += w_ * pros_priority[rbin, cbin, :]
+
+        # pick whichever row has the largest total score
+        best_row = np.argmax(row_scores)
+        best_score = row_scores[best_row]
+
+        # Optionally skip if best_score is extremely small,
+        # meaning there's no line worth acquiring
+        if best_score < 1e-6:
+            continue
+
+        # 2) Figure out official prospective bin => single bin
+        (official_rbin, official_cbin) = assign_bin_joint_fn(
+            resp_frac, resp_ph, card_frac
+        )
+
+        # 3) Fill that line in the official bin
+        fill_line_in_joint_bin(
+            official_rbin, official_cbin, best_row, pros_fill, pros_priority
+        )
+
+        acquired_lines[k] = (best_row, official_rbin, official_cbin)
 
     return acquired_lines

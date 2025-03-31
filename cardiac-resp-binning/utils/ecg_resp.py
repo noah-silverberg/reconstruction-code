@@ -32,7 +32,9 @@ def detect_r_peaks(ecg_data, fs):
 
     r_peaks_list = []
     for channel in ecg_data.T:
-        _, info = nk.ecg_process(channel, sampling_rate=fs)
+        channel_clean = nk.ecg_clean(channel, sampling_rate=fs)
+        _, info = nk.ecg_peaks(channel_clean, sampling_rate=fs)
+        # _, info = nk.ecg_peaks(channel, sampling_rate=fs)
         r_peaks = info["ECG_R_Peaks"]
         r_peaks_list.append(np.array(r_peaks))
 
