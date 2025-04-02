@@ -297,8 +297,8 @@ def get_joint_bin_weights_gaussian(
     use_total_resp_bins,
     num_total_resp_bins,
     num_card_bins,
-    resp_sigma_factor=0.1,
-    card_sigma_factor=0.1,
+    resp_sigma_factor=0.05,
+    card_sigma_factor=0.2,
 ):
     """
     Compute joint weights for respiratory and cardiac bins.
@@ -450,6 +450,9 @@ def prospective_fill_loop_joint(
 ):
     """
     Run the prospective filling loop for joint (respiratory and cardiac) bins.
+    Now, when a row is acquired, ALL bins lose some priority for that row, with
+    the highest-weight bin receiving the full penalty factor of 0.8 and the others
+    receiving a milder penalty factor according to their relative weight.
 
     Parameters
     ----------
@@ -462,13 +465,13 @@ def prospective_fill_loop_joint(
     cardiac_fraction_array : np.ndarray
         Array of cardiac fractions.
     pros_fill : np.ndarray
-        Joint k-space fill array (shape: [num_resp_bins, num_card_bins, kspace_height, kspace_width]).
+        Joint k-space fill array of shape (num_resp_bins, num_card_bins, kspace_height, kspace_width).
     pros_priority : np.ndarray
-        Joint line priority array (shape: [num_resp_bins, num_card_bins, kspace_height]).
+        Joint line-priority array of shape (num_resp_bins, num_card_bins, kspace_height).
     get_joint_weights_fn : callable
-        Function to compute joint bin weights.
+        Function to compute joint bin weights, e.g. get_joint_bin_weights_gaussian.
     assign_bin_joint_fn : callable
-        Function to assign an official joint bin.
+        Function to assign an official (resp_bin, card_bin) for the sample.
 
     Returns
     -------
@@ -476,26 +479,54 @@ def prospective_fill_loop_joint(
         List (length N) of acquired lines as (row_idx, resp_bin, card_bin) or None.
     """
     acquired_lines = [None] * N
+
+    # For convenience
     num_resp_bins, num_card_bins, kspace_height, _ = pros_fill.shape
-    for k in tqdm(range(N), desc="Prospective Joint Filling"):
+
+    for k in range(N):
         resp_frac = resp_fraction_array[k]
         resp_ph = resp_phase_array[k]
         card_frac = cardiac_fraction_array[k]
+
+        # Skip if signals are not valid
         if np.isnan(resp_frac) or resp_ph is None or np.isnan(card_frac):
             continue
+
+        # 1) Get unnormalized bin weights for all (rbin, cbin)
         joint_weights = get_joint_weights_fn(resp_frac, resp_ph, card_frac)
+        if not joint_weights:
+            continue
+
+        # 2) Combine their contributions to find the best row
         row_scores = np.zeros(kspace_height, dtype=float)
         for (rbin, cbin), w in joint_weights.items():
-            if w < 1e-8:
-                continue
             row_scores += w * pros_priority[rbin, cbin, :]
+
         best_row = np.argmax(row_scores)
         best_score = row_scores[best_row]
         if best_score < 1e-6:
+            # If the best row is effectively exhausted, skip
             continue
-        official_bins = assign_bin_joint_fn(resp_frac, resp_ph, card_frac)
-        fill_line_in_joint_bin(
-            official_bins[0], official_bins[1], best_row, pros_fill, pros_priority
+
+        # 3) Officially assign the sample to one bin for filling
+        (official_rbin, official_cbin) = assign_bin_joint_fn(
+            resp_frac, resp_ph, card_frac
         )
-        acquired_lines[k] = (best_row, official_bins[0], official_bins[1])
+        pros_fill[official_rbin, official_cbin, best_row, :] += 1.0
+        acquired_lines[k] = (best_row, official_rbin, official_cbin)
+
+        # 4) Penalize the same row in *all* bins proportionally
+        #    The bin with the largest weight gets factor=0.8,
+        #    smaller-weight bins get factors closer to 1.0
+        w_max = max(joint_weights.values())
+        # If w_max=0 (unlikely), skip
+        if abs(w_max) < 1e-12:
+            continue
+
+        for (rbin, cbin), w in joint_weights.items():
+            # penalty_factor = 1 - 0.2 * (w / w_max)
+            # So if w == w_max => factor=0.8, if w=0 => factor=1.0
+            penalty_factor = 1.0 - 0.2 * (w / w_max)
+            pros_priority[rbin, cbin, best_row] *= penalty_factor
+
     return acquired_lines
