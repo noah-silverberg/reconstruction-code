@@ -1,0 +1,264 @@
+# optimize_joint_binning.py
+
+import numpy as np
+import csv
+import os
+import itertools
+from tqdm import tqdm
+
+from simulate_joint_binning import (
+    process_data,
+    perform_prospective_binning,
+    perform_retrospective_assignment,
+)
+
+from utils.kspace_filling import (
+    build_line_priority_joint,
+    prospective_fill_loop_joint,
+    get_joint_bin_weights_gaussian,
+    assign_prospective_bin_joint,
+)
+
+
+def check_per_bin_acs(retro_fill, center_size=20, desired_coverage=3.0):
+    """
+    For each respiratory bin, sum over the cardiac bins => coverage_2d (KSPACE_H x KSPACE_W).
+    Then check the center block for zeros. If missing any line => cost = infinity.
+
+    Also compute a coverage cost that prefers coverage ~ `desired_coverage` across the image,
+    with heavier weighting near the center row if you want.
+
+    Returns cost (float), or np.inf if any bin fails the ACS check.
+    """
+
+    # retro_fill shape => (num_resp_bins, num_card_bins, H, W)
+    num_rbins, num_cbins, H, W = retro_fill.shape
+    total_cost = 0.0
+
+    # set up a weighting mask or something if you want heavier weighting in center
+    center_row = H // 2
+    row_indices = np.arange(H)
+    dist = np.abs(row_indices - center_row)
+    scale = H / 4.0
+    row_weight = np.exp(-0.5 * (dist / scale) ** 2)  # shape (H,)
+
+    half = center_size // 2
+    cx = W // 2
+    cy = H // 2
+
+    for rbin in range(num_rbins):
+        # sum across cardiac bins => shape (H, W)
+        coverage_2d = np.sum(retro_fill[rbin], axis=0)
+
+        # 1) Check ACS region => 20x20 block for zeros
+        block = coverage_2d[cy - half : cy + half, cx - half : cx + half]
+        if np.any(block <= 0):
+            return np.inf  # missing lines => cost=∞
+
+        # 2) coverage cost => measure how far coverage_2d is from `desired_coverage`
+        # We'll do a row-wise penalty that sums over columns, with row_weight
+        # E.g. sum_{row} row_weight[row] * mean( (coverage_2d[row,:] - desired)^2 ).
+        # Then accumulate in total_cost.
+
+        row_costs = []
+        for row_i in range(H):
+            row_values = coverage_2d[row_i, :]
+            diff = row_values - desired_coverage
+            # MSE along readout
+            mse = np.mean(diff**2)
+            row_costs.append(row_weight[row_i] * mse)
+
+        bin_cost = np.mean(row_costs)  # average across rows
+        total_cost += bin_cost
+
+    return total_cost
+
+
+def compute_cost_on_retro_fill(retro_fill, center_size=20, desired=3.0):
+    """
+    Master cost function that calls `check_per_bin_acs(retro_fill, ...)`.
+    If infinite, we return inf. Otherwise returns coverage-based cost.
+    """
+    cost_val = check_per_bin_acs(
+        retro_fill, center_size=center_size, desired_coverage=desired
+    )
+    return cost_val
+
+
+def run_joint_binning_once(
+    data,
+    resp_sigma_factor,
+    card_sigma_factor,
+    priority_exponent,
+    penalty_factor,
+):
+    """
+    1) Build prospective fill with the chosen hyperparameters
+    2) Acquire lines => acquired_lines
+    3) Use perform_retrospective_assignment to get RETRO fill
+    4) Return the retro fill
+    """
+    import functools
+    from utils.kspace_filling import (
+        build_line_priority_joint,
+        get_joint_bin_weights_gaussian,
+        prospective_fill_loop_joint,
+    )
+
+    # 1) Unpack the precomputed respiratory/cardiac predictions
+    predicted_resp_fraction = data["pred_resp_frac"]
+    predicted_resp_phase = data["pred_resp_phase"]
+    predicted_card_fraction = data["pred_card_frac"]
+    N_k = len(predicted_resp_fraction)
+
+    # 2) Create the prospective fill arrays
+    num_resp_bins = 4  # e.g. 3 inhale + 1 exhale
+    num_card_bins = 20
+    KSPACE_H, KSPACE_W = 128, 128
+    pros_fill = np.zeros(
+        (num_resp_bins, num_card_bins, KSPACE_H, KSPACE_W), dtype=float
+    )
+
+    # Priority array
+    pros_priority = build_line_priority_joint(
+        num_resp_bins=num_resp_bins,
+        num_card_bins=num_card_bins,
+        kspace_height=KSPACE_H,
+        priority_exponent=priority_exponent,
+    )
+
+    # Weighted function
+    get_joint_weights_fn = functools.partial(
+        get_joint_bin_weights_gaussian,
+        num_inhale_bins=3,
+        num_exhale_bins=1,
+        use_total_resp_bins=False,
+        num_total_resp_bins=4,
+        num_card_bins=num_card_bins,
+        resp_sigma_factor=resp_sigma_factor,
+        card_sigma_factor=card_sigma_factor,
+    )
+
+    def assign_bin_joint_fn(rfrac, rphase, cfrac):
+        from utils.kspace_filling import assign_prospective_bin_joint
+
+        return assign_prospective_bin_joint(
+            resp_fraction=rfrac,
+            resp_is_inhale=rphase,
+            cardiac_fraction=cfrac,
+            num_inhale_bins=3,
+            num_exhale_bins=1,
+            use_total_resp_bins=False,
+            num_total_resp_bins=4,
+            num_card_bins=num_card_bins,
+        )
+
+    # 3) prospective fill loop => acquired_lines
+    acquired_lines = prospective_fill_loop_joint(
+        N=N_k,
+        resp_fraction_array=predicted_resp_fraction,
+        resp_phase_array=predicted_resp_phase,
+        cardiac_fraction_array=predicted_card_fraction,
+        pros_fill=pros_fill,
+        pros_priority=pros_priority,
+        get_joint_weights_fn=get_joint_weights_fn,
+        assign_bin_joint_fn=assign_bin_joint_fn,
+        penalty_factor=penalty_factor,
+    )
+
+    # 4) Now do retrospective assignment to get retro_fill
+    from simulate_joint_binning import perform_retrospective_assignment
+
+    # We only need the retro_fill_joint from that function:
+    data_for_retro = {
+        "fs": data["fs"],
+        "N_k": data["N_k"],
+        "resp_signal_resampled": data["resp_signal_resampled"],
+        "ecg_signal_resampled": data["ecg_signal_resampled"],
+    }
+    retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline = (
+        perform_retrospective_assignment(data_for_retro, {}, pros_fill, acquired_lines)
+    )
+
+    return retro_fill_joint
+
+
+if __name__ == "__main__":
+    from simulate_joint_binning import (
+        load_config_file,
+        process_data,
+        perform_prospective_binning,
+    )
+
+    # 1) Load config
+    config = load_config_file("config.yaml")
+    data_dict = process_data(config)
+
+    # 2) Precompute predicted respiratory/cardiac fractions *once*:
+    _pros_fill, _acquired, pred_resp_frac, pred_resp_phase, pred_card_frac = (
+        perform_prospective_binning(data_dict, config)
+    )
+    data_dict["pred_resp_frac"] = pred_resp_frac
+    data_dict["pred_resp_phase"] = pred_resp_phase
+    data_dict["pred_card_frac"] = pred_card_frac
+
+    # Keep the raw signals in data_dict for retrospective assignment
+    data_dict["resp_signal_resampled"] = data_dict["resp_signal_resampled"]
+    data_dict["ecg_signal_resampled"] = data_dict["ecg_signal_resampled"]
+
+    # 3) define hyper-parameter ranges
+    import numpy as np
+
+    resp_sigma_list = np.linspace(0.01, 1, 20)
+    card_sigma_list = np.linspace(1.5, 3.5, 20)
+    exponent_list = np.linspace(0.5, 10.0, 20)
+    penalty_list = np.linspace(0.75, 0.99, 20)
+
+    out_csv = "gridsearch_results.csv"
+    results = []
+
+    # 4) grid search
+    total_combos = (
+        len(resp_sigma_list)
+        * len(card_sigma_list)
+        * len(exponent_list)
+        * len(penalty_list)
+    )
+
+    # Use tqdm to show progress
+    for r_sig, c_sig, expn, pen in tqdm(
+        itertools.product(
+            resp_sigma_list,
+            card_sigma_list,
+            exponent_list,
+            penalty_list,
+        ),
+        total=total_combos,
+        desc="Grid Search Progress",
+        unit="combo",
+    ):
+        # run joint binning => get retro fill
+        retro_fill = run_joint_binning_once(
+            data=data_dict,
+            resp_sigma_factor=r_sig,
+            card_sigma_factor=c_sig,
+            priority_exponent=expn,
+            penalty_factor=pen,
+        )
+        # compute cost
+        cost_val = compute_cost_on_retro_fill(retro_fill, center_size=20, desired=3.0)
+
+        results.append((r_sig, c_sig, expn, pen, cost_val))
+
+    # 5) write CSV
+    import csv
+
+    with open(out_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            ["resp_sigma", "card_sigma", "priority_exp", "penalty_factor", "cost"]
+        )
+        for row in results:
+            writer.writerow(row)
+
+    print("DONE. Wrote results to", out_csv)

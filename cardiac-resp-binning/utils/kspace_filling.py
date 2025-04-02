@@ -256,7 +256,9 @@ def prospective_fill_loop(
     return acquired_lines
 
 
-def build_line_priority_joint(num_resp_bins, num_card_bins, kspace_height=128):
+def build_line_priority_joint(
+    num_resp_bins, num_card_bins, kspace_height=128, priority_exponent=5.0
+):
     """
     Build a joint priority array for respiratory and cardiac bins.
 
@@ -282,8 +284,9 @@ def build_line_priority_joint(num_resp_bins, num_card_bins, kspace_height=128):
         for cbin in range(num_card_bins):
             for row_idx in range(kspace_height):
                 distance = abs(row_idx - center_index)
+                # Exponential decay based on distance^priority_exponent
                 priority_array[rbin, cbin, row_idx] = np.exp(
-                    -0.5 * (distance / (kspace_height / 4)) ** 5
+                    -0.5 * (distance / (kspace_height / 4)) ** priority_exponent
                 )
     return priority_array
 
@@ -447,6 +450,7 @@ def prospective_fill_loop_joint(
     pros_priority,
     get_joint_weights_fn,
     assign_bin_joint_fn,
+    penalty_factor=0.2,
 ):
     """
     Run the prospective filling loop for joint (respiratory and cardiac) bins.
@@ -479,54 +483,45 @@ def prospective_fill_loop_joint(
         List (length N) of acquired lines as (row_idx, resp_bin, card_bin) or None.
     """
     acquired_lines = [None] * N
-
-    # For convenience
     num_resp_bins, num_card_bins, kspace_height, _ = pros_fill.shape
-
     for k in range(N):
         resp_frac = resp_fraction_array[k]
         resp_ph = resp_phase_array[k]
         card_frac = cardiac_fraction_array[k]
-
-        # Skip if signals are not valid
         if np.isnan(resp_frac) or resp_ph is None or np.isnan(card_frac):
             continue
 
-        # 1) Get unnormalized bin weights for all (rbin, cbin)
         joint_weights = get_joint_weights_fn(resp_frac, resp_ph, card_frac)
         if not joint_weights:
             continue
 
-        # 2) Combine their contributions to find the best row
+        # Combine the priority for each row by weighting
         row_scores = np.zeros(kspace_height, dtype=float)
         for (rbin, cbin), w in joint_weights.items():
+            if w < 1e-12:
+                continue
             row_scores += w * pros_priority[rbin, cbin, :]
 
         best_row = np.argmax(row_scores)
         best_score = row_scores[best_row]
-        if best_score < 1e-6:
-            # If the best row is effectively exhausted, skip
+        if best_score < 1e-8:
             continue
 
-        # 3) Officially assign the sample to one bin for filling
-        (official_rbin, official_cbin) = assign_bin_joint_fn(
+        # Official bin assignment for record
+        (r_bin_official, c_bin_official) = assign_bin_joint_fn(
             resp_frac, resp_ph, card_frac
         )
-        pros_fill[official_rbin, official_cbin, best_row, :] += 1.0
-        acquired_lines[k] = (best_row, official_rbin, official_cbin)
+        acquired_lines[k] = (best_row, r_bin_official, c_bin_official)
 
-        # 4) Penalize the same row in *all* bins proportionally
-        #    The bin with the largest weight gets factor=0.8,
-        #    smaller-weight bins get factors closer to 1.0
+        # Find the maximum weight in the dictionary, for scaling
         w_max = max(joint_weights.values())
-        # If w_max=0 (unlikely), skip
-        if abs(w_max) < 1e-12:
-            continue
 
+        # Penalize that row in *all bins* proportionally
         for (rbin, cbin), w in joint_weights.items():
-            # penalty_factor = 1 - 0.2 * (w / w_max)
+            if w < 1e-12:
+                continue
+            # penalty = 1 - 0.2 * (w / w_max)
             # So if w == w_max => factor=0.8, if w=0 => factor=1.0
-            penalty_factor = 1.0 - 0.2 * (w / w_max)
-            pros_priority[rbin, cbin, best_row] *= penalty_factor
+            pros_priority[rbin, cbin, best_row] *= 1.0 - penalty_factor * (w / w_max)
 
     return acquired_lines
