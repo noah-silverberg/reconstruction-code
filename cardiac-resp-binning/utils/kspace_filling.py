@@ -9,6 +9,128 @@ bin weighting, assign prospective bins, and run the filling loops.
 import numpy as np
 from tqdm import tqdm
 
+# Try importing Numba, set a global flag if available
+try:
+    import numba
+
+    print("Numba available...")
+    NUMBA_AVAILABLE = True
+except ImportError:
+    print("Numba not available...")
+    NUMBA_AVAILABLE = False
+
+NUMBA_ACCEL = True  # Set to False to turn off JIT if needed
+
+
+# Numba-accelerated helper to fill row_scores
+@numba.njit(fastmath=True)
+def _fill_joint_priorities_loop(
+    row_scores, rbin_array, cbin_array, weight_array, pros_priority
+):
+    """
+    Accumulate row_scores by summing w * pros_priority[rbin, cbin, row]
+    for each bin combo. Because dicts don't work nicely in numba,
+    we pass pre-built arrays of (rbin, cbin, weight).
+    """
+    for i in range(rbin_array.size):
+        w = weight_array[i]
+        if w < 1e-12:
+            continue
+        rb = rbin_array[i]
+        cb = cbin_array[i]
+        for rr in range(row_scores.size):
+            row_scores[rr] += w * pros_priority[rb, cb, rr]
+
+
+# Numba-accelerated penalty routine without explicit signature
+@numba.njit(fastmath=True)
+def _penalize_priority(
+    best_row, rbin_array, cbin_array, weight_array, w_max, pros_priority, penalty
+):
+    """
+    Apply a penalty factor to pros_priority for the chosen row in all bins,
+    scaled by each bin's weight relative to w_max.
+    """
+    for i in range(rbin_array.size):
+        w = weight_array[i]
+        if w < 1e-12:
+            continue
+        scale = 1.0 - penalty * (w / w_max)
+        rb = rbin_array[i]
+        cb = cbin_array[i]
+        pros_priority[rb, cb, best_row] *= scale
+
+
+# Main Numba-accelerated loop for prospective filling (joint)
+@numba.njit(fastmath=True)
+def _pros_fill_loop_numba(
+    N,
+    resp_fraction_array,
+    resp_phase_array,
+    card_fraction_array,
+    rbin_indices,
+    cbin_indices,
+    weights,
+    pros_fill,
+    pros_priority,
+    penalty_factor,
+):
+    """
+    Numba-accelerated version of the main prospective fill loop for joint bins.
+    We store final row choices in out_rows (int array), then fill each line in Python.
+    """
+    num_resp_bins, num_card_bins, kspace_h, _ = pros_fill.shape
+
+    # Convert penalty_factor to float32 so it matches the rest
+    penalty_factor = np.float32(penalty_factor)
+
+    # Store the chosen row for each sample (can't store python objects in numba arrays)
+    out_rows = np.full(N, -1, dtype=np.int32)
+
+    for k in range(N):
+        # Skip if either fraction is NaN
+        if np.isnan(resp_fraction_array[k]) or np.isnan(card_fraction_array[k]):
+            continue
+
+        row_scores = np.zeros(kspace_h, dtype=np.float32)
+
+        # Sum w * pros_priority for each bin combination
+        _fill_joint_priorities_loop(
+            row_scores, rbin_indices[k], cbin_indices[k], weights[k], pros_priority
+        )
+
+        # Find the best row
+        best_row = 0
+        best_val = row_scores[0]
+        for rr in range(1, kspace_h):
+            if row_scores[rr] > best_val:
+                best_val = row_scores[rr]
+                best_row = rr
+        if best_val < 1e-8:
+            continue
+
+        # Compute w_max as float32
+        w_max = np.float32(0.0)
+        for wv in weights[k]:
+            if wv > w_max:
+                w_max = wv
+
+        # If w_max is significant, penalize
+        if w_max > np.float32(1e-12):
+            _penalize_priority(
+                best_row,
+                rbin_indices[k, :].copy(),
+                cbin_indices[k, :].copy(),
+                weights[k, :].copy(),
+                w_max,
+                pros_priority,
+                penalty_factor,
+            )
+
+        out_rows[k] = best_row
+
+    return out_rows
+
 
 def build_line_priority(num_bins, kspace_height=128):
     """
@@ -482,46 +604,97 @@ def prospective_fill_loop_joint(
     list
         List (length N) of acquired lines as (row_idx, resp_bin, card_bin) or None.
     """
-    acquired_lines = [None] * N
-    num_resp_bins, num_card_bins, kspace_height, _ = pros_fill.shape
-    for k in range(N):
-        resp_frac = resp_fraction_array[k]
-        resp_ph = resp_phase_array[k]
-        card_frac = cardiac_fraction_array[k]
-        if np.isnan(resp_frac) or resp_ph is None or np.isnan(card_frac):
-            continue
+    if NUMBA_ACCEL and NUMBA_AVAILABLE:
+        num_resp_bins, num_card_bins, _, _ = pros_fill.shape
 
-        joint_weights = get_joint_weights_fn(resp_frac, resp_ph, card_frac)
-        if not joint_weights:
-            continue
+        # Prepare arrays of (rbin, cbin, weight) for each sample
+        max_pairs = num_resp_bins * num_card_bins
+        rbin_indices = np.full((N, max_pairs), -1, dtype=np.int32)
+        cbin_indices = np.full((N, max_pairs), -1, dtype=np.int32)
+        weights = np.zeros((N, max_pairs), dtype=np.float32)
 
-        # Combine the priority for each row by weighting
-        row_scores = np.zeros(kspace_height, dtype=float)
-        for (rbin, cbin), w in joint_weights.items():
-            if w < 1e-12:
+        for k in range(N):
+            if np.isnan(resp_fraction_array[k]) or np.isnan(cardiac_fraction_array[k]):
                 continue
-            row_scores += w * pros_priority[rbin, cbin, :]
+            wdict = get_joint_weights_fn(
+                resp_fraction_array[k],
+                resp_phase_array[k],
+                cardiac_fraction_array[k],
+            )
+            idx = 0
+            for (rb, cb), val in wdict.items():
+                rbin_indices[k, idx] = rb
+                cbin_indices[k, idx] = cb
+                weights[k, idx] = val
+                idx += 1
 
-        best_row = np.argmax(row_scores)
-        best_score = row_scores[best_row]
-        if best_score < 1e-8:
-            continue
-
-        # Official bin assignment for record
-        (r_bin_official, c_bin_official) = assign_bin_joint_fn(
-            resp_frac, resp_ph, card_frac
+        out_rows = _pros_fill_loop_numba(
+            N,
+            resp_fraction_array,
+            resp_phase_array,
+            cardiac_fraction_array,
+            rbin_indices,
+            cbin_indices,
+            weights,
+            pros_fill,
+            pros_priority,
+            penalty_factor,
         )
-        acquired_lines[k] = (best_row, r_bin_official, c_bin_official)
 
-        # Find the maximum weight in the dictionary, for scaling
-        w_max = max(joint_weights.values())
-
-        # Penalize that row in *all bins* proportionally
-        for (rbin, cbin), w in joint_weights.items():
-            if w < 1e-12:
+        # Convert row_idx -> final bin assignment + fill
+        acquired_lines = [None] * N
+        for k in range(N):
+            row_idx = out_rows[k]
+            if row_idx < 0:
                 continue
-            # penalty = 1 - 0.2 * (w / w_max)
-            # So if w == w_max => factor=0.8, if w=0 => factor=1.0
-            pros_priority[rbin, cbin, best_row] *= 1.0 - penalty_factor * (w / w_max)
+            rbin_off, cbin_off = assign_bin_joint_fn(
+                resp_fraction_array[k],
+                resp_phase_array[k],
+                cardiac_fraction_array[k],
+            )
+            fill_line_in_joint_bin(
+                rbin_off, cbin_off, row_idx, pros_fill, pros_priority
+            )
+            acquired_lines[k] = (row_idx, rbin_off, cbin_off)
 
-    return acquired_lines
+        return acquired_lines
+    else:
+        # Fallback: original Python approach
+        acquired_lines = [None] * N
+        num_resp_bins, num_card_bins, kspace_height, _ = pros_fill.shape
+
+        for k in range(N):
+            resp_frac = resp_fraction_array[k]
+            resp_ph = resp_phase_array[k]
+            card_frac = cardiac_fraction_array[k]
+            if np.isnan(resp_frac) or resp_ph is None or np.isnan(card_frac):
+                continue
+
+            joint_weights = get_joint_weights_fn(resp_frac, resp_ph, card_frac)
+            if not joint_weights:
+                continue
+
+            row_scores = np.zeros(kspace_height, dtype=float)
+            for (rbin, cbin), w in joint_weights.items():
+                row_scores += w * pros_priority[rbin, cbin, :]
+
+            best_row = np.argmax(row_scores)
+            if row_scores[best_row] < 1e-8:
+                continue
+
+            r_bin_official, c_bin_official = assign_bin_joint_fn(
+                resp_frac, resp_ph, card_frac
+            )
+            acquired_lines[k] = (best_row, r_bin_official, c_bin_official)
+
+            # penalty
+            w_max = max(joint_weights.values())
+            for (rbin, cbin), w in joint_weights.items():
+                factor = 1.0 - penalty_factor * (w / w_max)
+                pros_priority[rbin, cbin, best_row] *= factor
+
+            fill_line_in_joint_bin(
+                r_bin_official, c_bin_official, best_row, pros_fill, pros_priority
+            )
+
+        return acquired_lines

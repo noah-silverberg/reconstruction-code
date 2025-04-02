@@ -5,18 +5,19 @@ import csv
 import os
 import itertools
 from tqdm import tqdm
+import time
+from multiprocessing import Pool, cpu_count
 
 from simulate_joint_binning import (
     process_data,
     perform_prospective_binning,
     perform_retrospective_assignment,
 )
-
+import functools
 from utils.kspace_filling import (
     build_line_priority_joint,
-    prospective_fill_loop_joint,
     get_joint_bin_weights_gaussian,
-    assign_prospective_bin_joint,
+    prospective_fill_loop_joint,
 )
 
 
@@ -98,13 +99,6 @@ def run_joint_binning_once(
     3) Use perform_retrospective_assignment to get RETRO fill
     4) Return the retro fill
     """
-    import functools
-    from utils.kspace_filling import (
-        build_line_priority_joint,
-        get_joint_bin_weights_gaussian,
-        prospective_fill_loop_joint,
-    )
-
     # 1) Unpack the precomputed respiratory/cardiac predictions
     predicted_resp_fraction = data["pred_resp_frac"]
     predicted_resp_phase = data["pred_resp_phase"]
@@ -166,9 +160,6 @@ def run_joint_binning_once(
         penalty_factor=penalty_factor,
     )
 
-    # 4) Now do retrospective assignment to get retro_fill
-    from simulate_joint_binning import perform_retrospective_assignment
-
     # We only need the retro_fill_joint from that function:
     data_for_retro = {
         "fs": data["fs"],
@@ -181,6 +172,19 @@ def run_joint_binning_once(
     )
 
     return retro_fill_joint
+
+
+def run_one_combo(args):
+    r_sig, c_sig, expn, pen, data_dict = args
+    retro_fill = run_joint_binning_once(
+        data=data_dict,
+        resp_sigma_factor=r_sig,
+        card_sigma_factor=c_sig,
+        priority_exponent=expn,
+        penalty_factor=pen,
+    )
+    cost_val = compute_cost_on_retro_fill(retro_fill, center_size=20, desired=3.0)
+    return (r_sig, c_sig, expn, pen, cost_val)
 
 
 if __name__ == "__main__":
@@ -209,10 +213,10 @@ if __name__ == "__main__":
     # 3) define hyper-parameter ranges
     import numpy as np
 
-    resp_sigma_list = np.linspace(0.01, 1, 20)
-    card_sigma_list = np.linspace(1.5, 3.5, 20)
-    exponent_list = np.linspace(0.5, 10.0, 20)
-    penalty_list = np.linspace(0.75, 0.99, 20)
+    resp_sigma_list = np.linspace(1.5, 3.5, 5)
+    card_sigma_list = np.linspace(7, 10, 10)
+    exponent_list = np.linspace(0.35, 0.55, 5)
+    penalty_list = np.linspace(0.90, 0.99, 10)
 
     out_csv = "gridsearch_results.csv"
     results = []
@@ -225,30 +229,25 @@ if __name__ == "__main__":
         * len(penalty_list)
     )
 
-    # Use tqdm to show progress
-    for r_sig, c_sig, expn, pen in tqdm(
-        itertools.product(
-            resp_sigma_list,
-            card_sigma_list,
-            exponent_list,
-            penalty_list,
-        ),
-        total=total_combos,
-        desc="Grid Search Progress",
-        unit="combo",
-    ):
-        # run joint binning => get retro fill
-        retro_fill = run_joint_binning_once(
-            data=data_dict,
-            resp_sigma_factor=r_sig,
-            card_sigma_factor=c_sig,
-            priority_exponent=expn,
-            penalty_factor=pen,
-        )
-        # compute cost
-        cost_val = compute_cost_on_retro_fill(retro_fill, center_size=20, desired=3.0)
+    combos = []
+    for r_sig in resp_sigma_list:
+        for c_sig in card_sigma_list:
+            for expn in exponent_list:
+                for pen in penalty_list:
+                    combos.append((r_sig, c_sig, expn, pen, data_dict))
 
-        results.append((r_sig, c_sig, expn, pen, cost_val))
+    results = []
+
+    time_start = time.time()
+    with Pool(processes=cpu_count()) as p:
+        # Use map to parallelize the function calls
+        results = p.map(run_one_combo, combos)
+    time_end = time.time()
+    # Print combos/s
+    print(
+        f"Completed {len(results)} combinations in {time_end - time_start:.2f} seconds."
+    )
+    print(f"That is {len(results)/(time_end - time_start):.2f} combos per second.")
 
     # 5) write CSV
     import csv

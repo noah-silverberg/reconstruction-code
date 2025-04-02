@@ -157,7 +157,7 @@ def predict_fraction(
     """
     N = len(resp_signal)
     predicted_fraction = np.full(N, np.nan)
-    predicted_phase = np.full(N, None, dtype=object)
+    predicted_phase = np.full(N, np.nan, dtype=bool)
     calibration_done = False
     calibration_end_idx = None
     avg_inhale, avg_exhale = None, None
