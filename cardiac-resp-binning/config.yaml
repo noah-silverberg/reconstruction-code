@@ -10,6 +10,7 @@ data:
   ]
   event_file: "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_EVNT_25.log"
   resp_file: "20250307_JM/ecg_resp/cine3_2_Cor_250306_2_syncdata_RESP_200.log"
+  # resp_file: "Physio_20240327_122135_a1be91cb-3ecb-4c7e-93c4-d31e1a871138_RESP.log"
   n_frames: 100
   extended_pe_lines: 128
   offset: 32

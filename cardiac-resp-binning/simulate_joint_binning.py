@@ -97,7 +97,10 @@ def process_data(config):
 
     # Resample respiration and ECG signals to match kspace length
     resp_signal = np.loadtxt(RESP_FILE, skiprows=1, usecols=1)
+    # resp_signal = np.loadtxt(RESP_FILE, skiprows=8, usecols=2)
+    # resp_signal = signal.resample(resp_signal, int(len(resp_signal) * fs / (1 / 8e-3)))
     ecg_signal = np.loadtxt(ECG_FILES[0], skiprows=1, usecols=1)
+    # resp_signal = resp_signal[: len(ecg_signal)]
     N_k = kspace.shape[0]
     print(f"N_k: {N_k}")
 
@@ -380,7 +383,7 @@ def visualize_results(
         global_max_actual = np.max(actual_fill_joint[rbin, :, :, :]) or 1.0
 
         fig, axs = plt.subplots(
-            4, NUM_CARD_BINS, figsize=(4 * NUM_CARD_BINS, 16), sharex=True, sharey=True
+            4, NUM_CARD_BINS, figsize=(4 * NUM_CARD_BINS, 8), sharex=True, sharey=True
         )
         if NUM_CARD_BINS == 1:
             axs = np.expand_dims(axs, axis=1)
@@ -403,6 +406,9 @@ def visualize_results(
                 origin="upper",
                 aspect="auto",
             )
+            axs[1, cbin].axhline(
+                y=KSPACE_H // 2, color="red", linestyle="--", linewidth=1
+            )
             axs[1, cbin].set_title(f"Retro: Rbin={rbin}, Cbin={cbin}", fontsize=10)
             axs[1, cbin].axis("off")
             plt.colorbar(im1, ax=axs[1, cbin], fraction=0.046, pad=0.04)
@@ -416,6 +422,9 @@ def visualize_results(
                 origin="upper",
                 aspect="auto",
             )
+            axs[2, cbin].axhline(
+                y=KSPACE_H // 2, color="red", linestyle="--", linewidth=1
+            )
             axs[2, cbin].set_title(f"Diff: Rbin={rbin}, Cbin={cbin}", fontsize=10)
             axs[2, cbin].axis("off")
             plt.colorbar(im2, ax=axs[2, cbin], fraction=0.046, pad=0.04)
@@ -427,6 +436,9 @@ def visualize_results(
                 norm=mcolors.PowerNorm(gamma=0.3, vmin=0, vmax=global_max_actual),
                 origin="upper",
                 aspect="auto",
+            )
+            axs[3, cbin].axhline(
+                y=KSPACE_H // 2, color="red", linestyle="--", linewidth=1
             )
             axs[3, cbin].set_title(f"Actual: Rbin={rbin}, Cbin={cbin}", fontsize=10)
             axs[3, cbin].axis("off")
