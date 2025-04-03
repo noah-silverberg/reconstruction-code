@@ -147,7 +147,7 @@ def perform_prospective_binning(data, config):
         num_resp_bins=num_resp_bins,
         num_card_bins=NUM_CARD_BINS,
         kspace_height=KSPACE_H,
-        priority_exponent=0.45,
+        priority_exponent=2.6,
     )
 
     # Create partial functions for joint bin weight and assignment
@@ -158,8 +158,8 @@ def perform_prospective_binning(data, config):
         use_total_resp_bins=USE_TOTAL_BINS,
         num_total_resp_bins=4,
         num_card_bins=NUM_CARD_BINS,
-        resp_sigma_factor=3.5,
-        card_sigma_factor=8,
+        resp_sigma_factor=0.4,
+        card_sigma_factor=0.7,
     )
     assign_joint_bin = functools.partial(
         kf.assign_prospective_bin_joint,
@@ -180,7 +180,7 @@ def perform_prospective_binning(data, config):
         pros_priority=pros_priority_joint,
         get_joint_weights_fn=get_joint_weights,
         assign_bin_joint_fn=assign_joint_bin,
-        penalty_factor=0.9,
+        penalty_factor=0.26,
     )
     print("Completed prospective joint binning.")
 

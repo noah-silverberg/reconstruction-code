@@ -18,59 +18,67 @@ from utils.kspace_filling import (
     build_line_priority_joint,
     get_joint_bin_weights_gaussian,
     prospective_fill_loop_joint,
+    assign_prospective_bin_joint,
 )
 
 
 def check_per_bin_acs(retro_fill, center_size=20, desired_coverage=3.0):
     """
-    For each respiratory bin, sum over the cardiac bins => coverage_2d (KSPACE_H x KSPACE_W).
-    Then check the center block for zeros. If missing any line => cost = infinity.
+    For each respiratory bin (rbin), we first sum across the cardiac bins and
+    check that the center ACS block has no zeros. If any line is missing, we
+    return infinity.
 
-    Also compute a coverage cost that prefers coverage ~ `desired_coverage` across the image,
-    with heavier weighting near the center row if you want.
+    Then, for the coverage cost, we now compute the deviation from `desired_coverage`
+    *within each cardiac bin separately*, weighting each row by `row_weight`.
+    Finally, we sum those bin-wise costs across all cardiac bins and respiratory bins.
 
-    Returns cost (float), or np.inf if any bin fails the ACS check.
+    Returns
+    -------
+    float
+        The final coverage cost, or np.inf if ACS coverage fails.
     """
 
-    # retro_fill shape => (num_resp_bins, num_card_bins, H, W)
+    # retro_fill => (num_resp_bins, num_card_bins, H, W)
     num_rbins, num_cbins, H, W = retro_fill.shape
     total_cost = 0.0
 
-    # set up a weighting mask or something if you want heavier weighting in center
+    # Build a row weighting mask to emphasize coverage near the center row more heavily
     center_row = H // 2
     row_indices = np.arange(H)
     dist = np.abs(row_indices - center_row)
-    scale = H / 4.0
+    scale = H / 2.0
     row_weight = np.exp(-0.5 * (dist / scale) ** 2)  # shape (H,)
 
+    # ACS region parameters
     half = center_size // 2
     cx = W // 2
     cy = H // 2
 
     for rbin in range(num_rbins):
-        # sum across cardiac bins => shape (H, W)
-        coverage_2d = np.sum(retro_fill[rbin], axis=0)
-
-        # 1) Check ACS region => 20x20 block for zeros
+        # 1) ACS check: sum over all cardiac bins
+        coverage_2d = np.sum(np.abs(retro_fill[rbin]), axis=0)  # shape (H, W)
         block = coverage_2d[cy - half : cy + half, cx - half : cx + half]
         if np.any(block <= 0):
-            return np.inf  # missing lines => cost=∞
+            return np.inf  # Missing lines => cost=∞
 
-        # 2) coverage cost => measure how far coverage_2d is from `desired_coverage`
-        # We'll do a row-wise penalty that sums over columns, with row_weight
-        # E.g. sum_{row} row_weight[row] * mean( (coverage_2d[row,:] - desired)^2 ).
-        # Then accumulate in total_cost.
+        # 2) Coverage cost: now do it for each (rbin, cbin) individually
+        rbin_cost = 0.0
+        for cbin in range(num_cbins):
+            coverage_bin = retro_fill[rbin, cbin]  # shape (H, W)
 
-        row_costs = []
-        for row_i in range(H):
-            row_values = coverage_2d[row_i, :]
-            diff = row_values - desired_coverage
-            # MSE along readout
-            mse = np.mean(diff**2)
-            row_costs.append(row_weight[row_i] * mse)
+            row_costs = []
+            for row_i in range(H):
+                row_values = coverage_bin[row_i, :]  # shape (W,)
+                diff = row_values - desired_coverage
+                mse = np.mean(diff**2)  # Mean-squared error for this row
+                row_costs.append(row_weight[row_i] * mse)
 
-        bin_cost = np.mean(row_costs)  # average across rows
-        total_cost += bin_cost
+            # Average cost across rows for this (rbin, cbin)
+            bin_cost = np.mean(row_costs)
+            rbin_cost += bin_cost
+
+        # Accumulate across all cbin for this respiratory bin
+        total_cost += rbin_cost / num_cbins
 
     return total_cost
 
@@ -134,8 +142,6 @@ def run_joint_binning_once(
     )
 
     def assign_bin_joint_fn(rfrac, rphase, cfrac):
-        from utils.kspace_filling import assign_prospective_bin_joint
-
         return assign_prospective_bin_joint(
             resp_fraction=rfrac,
             resp_is_inhale=rphase,
@@ -213,10 +219,10 @@ if __name__ == "__main__":
     # 3) define hyper-parameter ranges
     import numpy as np
 
-    resp_sigma_list = np.linspace(1.5, 3.5, 5)
-    card_sigma_list = np.linspace(7, 10, 10)
-    exponent_list = np.linspace(0.35, 0.55, 5)
-    penalty_list = np.linspace(0.90, 0.99, 10)
+    resp_sigma_list = np.linspace(0.25, 0.55, 10)
+    card_sigma_list = np.linspace(0.40, 0.75, 10)
+    exponent_list = np.linspace(2.6, 2.6, 1)
+    penalty_list = np.linspace(0.24, 0.3, 10)
 
     out_csv = "gridsearch_results.csv"
     results = []
