@@ -7,11 +7,23 @@ respiration and cardiac phases to fill a joint k-space bin array.
 It then performs retrospective analysis and visualizes the results via subplots
 and confusion matrix plots.
 
-Refactoring changes:
- - Split main() into several helper functions: load_config_file, process_data,
-   perform_prospective_binning, perform_retrospective_assignment, and visualize_results.
- - Improved function and variable names for clarity.
- - Added detailed docstrings and inline comments.
+Below, we have UPDATED the code to also place the “actual” lines
+into a new array called `actual_fill_joint`, which captures all lines that
+were physically measured (i.e. the entire dataset) assigned to bins via
+the same “retrospective” logic. This lets us compare:
+
+  - Prospective simulation (pros_fill_joint)
+  - Retrospective assignment of pros (retro_fill_joint)
+  - Actual data usage (actual_fill_joint) – i.e., “what was truly measured,”
+    but still placed into bins by offline fraction
+  - And we then visualize all three plus a difference map
+
+Also, we now compute a cost function value for the “actual” bins so you can compare
+the coverage vs. the simulated prospective or retrospective bins.
+
+All the rest of the code remains unchanged except where we inserted the minimal lines
+needed to produce `actual_fill_joint`, display it as a fourth row in each subplot figure,
+and compute its cost function for comparison.
 """
 
 import yaml
@@ -21,6 +33,11 @@ import pandas as pd
 from scipy import signal
 import matplotlib.colors as mcolors
 import functools
+
+# -------------
+# ADDED import so we can compute the cost function for the "actual" bins
+# -------------
+from optimize_joint_binning import compute_cost_on_retro_fill
 
 # Local module imports
 import utils.data_ingestion as di
@@ -58,6 +75,7 @@ def process_data(config):
             - kspace: raw k-space data
             - fs: sampling frequency computed from DICOM parameters
             - n_frames: number of frames
+            - N_k: total number of lines in k-space
             - resp_signal_resampled: resampled respiration signal
             - ecg_signal_resampled: resampled ECG signal
     """
@@ -71,6 +89,9 @@ def process_data(config):
     kspace = di.extract_image_data(scans)
     FRAMERATE, _ = di.get_dicom_framerate(DICOM_DIR)
     N_PHASE_ENCODES_PER_FRAME = kspace.shape[0] // n_frames
+    print(f"Number of frames: {n_frames}")
+    print(f"Number of phase encodes per frame: {N_PHASE_ENCODES_PER_FRAME}")
+    print(f"Total number of lines in k-space: {kspace.shape[0]}")
     fs = FRAMERATE * N_PHASE_ENCODES_PER_FRAME
     print(f"Resp sample rate => fs={fs:.2f} Hz")
 
@@ -78,6 +99,7 @@ def process_data(config):
     resp_signal = np.loadtxt(RESP_FILE, skiprows=1, usecols=1)
     ecg_signal = np.loadtxt(ECG_FILES[0], skiprows=1, usecols=1)
     N_k = kspace.shape[0]
+    print(f"N_k: {N_k}")
 
     resp_signal_resampled = signal.resample(resp_signal, N_k)
     ecg_signal_resampled = signal.resample(ecg_signal, N_k)
@@ -139,7 +161,7 @@ def perform_prospective_binning(data, config):
     NUM_CARD_BINS = 20
 
     # Initialize prospective k-space fill arrays
-    KSPACE_H, KSPACE_W = 128, 128
+    KSPACE_H, KSPACE_W = 128, 256
     pros_fill_joint = np.zeros(
         (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
     )
@@ -197,10 +219,15 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
     """
     Compute offline respiratory fractions and perform retrospective k-space filling.
 
+    Also build the 'actual_fill_joint' array, which places ALL lines (k=0..N_k-1)
+    into bins using the same offline fraction logic (no skipping).
+    This represents the real measured data distribution across bins.
+
     Returns
     -------
     tuple
-        (retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline)
+        (retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline,
+         actual_fill_joint)
     """
     fs = data["fs"]
     N_k = data["N_k"]
@@ -250,6 +277,14 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
         (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
     )
 
+    # -------------
+    # NEW array: actual_fill_joint
+    # -------------
+    actual_fill_joint = np.zeros(
+        (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
+    )
+
+    # Fill in the retrospective bins (only for lines that prospective approach "acquired")
     for k in range(N_k):
         if acquired_lines[k] is None:
             continue
@@ -272,7 +307,41 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
         retro_fill_joint[rbin_true, cbin_true, row, :] += 1.0
 
     diff_joint = retro_fill_joint - pros_fill_joint
-    return retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline
+
+    # -------------
+    # Fill the actual bins (no skipping). This means we place EVERY line k
+    # into the appropriate bin, using the same offline fraction approach.
+    # row is typically k % KSPACE_H (the i-th line in each "frame" block).
+    # -------------
+    row_offset = config["data"].get("offset", 0)
+    for k in range(N_k):
+        # Compute the line index for the actual fill by adding the offset
+        row = (k % 48) + row_offset
+        r_frac = resp_frac_offline[k]
+        c_frac = card_frac_offline[k]
+        if np.isnan(r_frac) or np.isnan(c_frac):
+            continue
+        inhale_flag = is_inhale_offline(k, cycles)
+        (rbin_true, cbin_true) = kf.assign_prospective_bin_joint(
+            resp_fraction=r_frac,
+            resp_is_inhale=inhale_flag,
+            cardiac_fraction=c_frac,
+            num_inhale_bins=3,
+            num_exhale_bins=1,
+            use_total_resp_bins=False,
+            num_total_resp_bins=4,
+            num_card_bins=NUM_CARD_BINS,
+        )
+        actual_fill_joint[rbin_true, cbin_true, row, :] += 1.0
+
+    return (
+        retro_fill_joint,
+        diff_joint,
+        cycles,
+        resp_frac_offline,
+        card_frac_offline,
+        actual_fill_joint,
+    )
 
 
 def visualize_results(
@@ -284,6 +353,7 @@ def visualize_results(
     resp_frac_offline,
     card_frac_offline,
     data,
+    actual_fill_joint,  # NEW argument
 ):
     """
     Visualize the prospective and retrospective joint k-space filling,
@@ -297,14 +367,20 @@ def visualize_results(
     num_resp_bins, NUM_CARD_BINS, KSPACE_H, _ = pros_fill_joint.shape
     N_k = data["N_k"]
 
-    # Plot the k-space fill subplots as before
+    # Plot the k-space fill subplots as before, but now we have 4 rows instead of 3:
+    #  [0] Prospective
+    #  [1] Retrospective
+    #  [2] Difference
+    #  [3] Actual
     for rbin in range(num_resp_bins):
         global_max_pros = np.max(pros_fill_joint[rbin, :, :, :]) or 1.0
         global_max_retro = np.max(retro_fill_joint[rbin, :, :, :]) or 1.0
         global_max_diff = np.max(np.abs(diff_joint[rbin, :, :, :])) or 1.0
+        # We also will scale "actual" by the same standard as prospective for display
+        global_max_actual = np.max(actual_fill_joint[rbin, :, :, :]) or 1.0
 
         fig, axs = plt.subplots(
-            3, NUM_CARD_BINS, figsize=(4 * NUM_CARD_BINS, 12), sharex=True, sharey=True
+            4, NUM_CARD_BINS, figsize=(4 * NUM_CARD_BINS, 16), sharex=True, sharey=True
         )
         if NUM_CARD_BINS == 1:
             axs = np.expand_dims(axs, axis=1)
@@ -343,6 +419,19 @@ def visualize_results(
             axs[2, cbin].set_title(f"Diff: Rbin={rbin}, Cbin={cbin}", fontsize=10)
             axs[2, cbin].axis("off")
             plt.colorbar(im2, ax=axs[2, cbin], fraction=0.046, pad=0.04)
+
+            # NEW: Actual row
+            im3 = axs[3, cbin].imshow(
+                actual_fill_joint[rbin, cbin],
+                cmap="gray",
+                norm=mcolors.PowerNorm(gamma=0.3, vmin=0, vmax=global_max_actual),
+                origin="upper",
+                aspect="auto",
+            )
+            axs[3, cbin].set_title(f"Actual: Rbin={rbin}, Cbin={cbin}", fontsize=10)
+            axs[3, cbin].axis("off")
+            plt.colorbar(im3, ax=axs[3, cbin], fraction=0.046, pad=0.04)
+
         fig.suptitle(f"Joint K-Space Binning: Respiratory Bin {rbin}", fontsize=14)
         fig.tight_layout()
         out_png = f"joint_fill_rbin_{rbin}_subplots.png"
@@ -469,9 +558,18 @@ def main():
     pros_fill_joint, acquired_lines, pred_resp_frac, pred_resp_phase, pred_card_frac = (
         perform_prospective_binning(data, config)
     )
-    retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline = (
-        perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lines)
-    )
+
+    # Now do retrospective assignment (and build actual_fill_joint)
+    (
+        retro_fill_joint,
+        diff_joint,
+        cycles,
+        resp_frac_offline,
+        card_frac_offline,
+        actual_fill_joint,  # new array
+    ) = perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lines)
+
+    # Visualize, passing in actual_fill_joint
     visualize_results(
         pros_fill_joint,
         retro_fill_joint,
@@ -481,7 +579,25 @@ def main():
         resp_frac_offline,
         card_frac_offline,
         data,
+        actual_fill_joint,
     )
+
+    # -------------
+    # Finally, compute cost function for each scenario, just for comparison
+    # -------------
+    cost_pros = compute_cost_on_retro_fill(pros_fill_joint, center_size=20, desired=3.0)
+    cost_retro = compute_cost_on_retro_fill(
+        retro_fill_joint, center_size=20, desired=3.0
+    )
+    cost_actual = compute_cost_on_retro_fill(
+        actual_fill_joint, center_size=20, desired=3.0
+    )
+
+    print("------------------------------------------------------")
+    print(f"Prospective Simulation Cost = {cost_pros:.3f}")
+    print(f"Retrospective Assignment Cost = {cost_retro:.3f}")
+    print(f"Actual Data (All Lines) Cost = {cost_actual:.3f}")
+    print("------------------------------------------------------")
 
 
 if __name__ == "__main__":

@@ -8,11 +8,6 @@ from tqdm import tqdm
 import time
 from multiprocessing import Pool, cpu_count
 
-from simulate_joint_binning import (
-    process_data,
-    perform_prospective_binning,
-    perform_retrospective_assignment,
-)
 import functools
 from utils.kspace_filling import (
     build_line_priority_joint,
@@ -107,6 +102,12 @@ def run_joint_binning_once(
     3) Use perform_retrospective_assignment to get RETRO fill
     4) Return the retro fill
     """
+    from simulate_joint_binning import (
+        process_data,
+        perform_prospective_binning,
+        perform_retrospective_assignment,
+    )
+
     # 1) Unpack the precomputed respiratory/cardiac predictions
     predicted_resp_fraction = data["pred_resp_frac"]
     predicted_resp_phase = data["pred_resp_phase"]
