@@ -3,27 +3,19 @@
 simulate_joint_binning.py
 
 This script demonstrates a joint prospective binning approach that uses both
-respiration and cardiac phases to fill a joint k-space bin array.
-It then performs retrospective analysis and visualizes the results via subplots
-and confusion matrix plots.
+respiration and cardiac phases to fill a joint k-space bin array. It then
+performs retrospective analysis and visualizes the results via subplots and
+confusion matrix plots.
 
-Below, we have UPDATED the code to also place the “actual” lines
-into a new array called `actual_fill_joint`, which captures all lines that
-were physically measured (i.e. the entire dataset) assigned to bins via
-the same “retrospective” logic. This lets us compare:
-
+The script additionally computes an "actual" k-space fill (actual_fill_joint),
+which assigns every acquired k-space line into bins using offline fraction logic.
+This allows comparison between:
   - Prospective simulation (pros_fill_joint)
-  - Retrospective assignment of pros (retro_fill_joint)
-  - Actual data usage (actual_fill_joint) – i.e., “what was truly measured,”
-    but still placed into bins by offline fraction
-  - And we then visualize all three plus a difference map
+  - Retrospective assignment of prospective lines (retro_fill_joint)
+  - Actual data usage (actual_fill_joint)
+  - And a difference map between prospective and retrospective fills
 
-Also, we now compute a cost function value for the “actual” bins so you can compare
-the coverage vs. the simulated prospective or retrospective bins.
-
-All the rest of the code remains unchanged except where we inserted the minimal lines
-needed to produce `actual_fill_joint`, display it as a fourth row in each subplot figure,
-and compute its cost function for comparison.
+It also computes a cost function value for each scenario for further comparison.
 """
 
 import yaml
@@ -34,9 +26,7 @@ from scipy import signal
 import matplotlib.colors as mcolors
 import functools
 
-# -------------
-# ADDED import so we can compute the cost function for the "actual" bins
-# -------------
+# Import for computing cost function on retrospective fills
 from optimize_joint_binning import compute_cost_on_retro_fill
 
 # Local module imports
@@ -58,7 +48,7 @@ def load_config_file(config_file="config.yaml"):
     Returns
     -------
     dict
-        Parsed configuration.
+        Parsed configuration dictionary.
     """
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
@@ -66,44 +56,69 @@ def load_config_file(config_file="config.yaml"):
 
 def process_data(config):
     """
-    Load scan data, extract k-space and signals, and compute sampling parameters.
+    Load scan data, extract k-space data and physiological signals,
+    and compute the necessary sampling parameters.
+
+    The function reads the Twix file and DICOM folder to extract k-space
+    data. It then resamples the respiration and ECG signals to match the
+    number of k-space lines.
+
+    Parameters
+    ----------
+    config : dict
+        Configuration dictionary with data file paths and parameters.
 
     Returns
     -------
     dict
-        Dictionary containing:
-            - kspace: raw k-space data
-            - fs: sampling frequency computed from DICOM parameters
-            - n_frames: number of frames
-            - N_k: total number of lines in k-space
-            - resp_signal_resampled: resampled respiration signal
-            - ecg_signal_resampled: resampled ECG signal
+        A dictionary containing:
+            - kspace : np.ndarray
+                The raw k-space data.
+            - fs : float
+                Sampling frequency computed from DICOM parameters.
+            - n_frames : int
+                Number of frames in the k-space data.
+            - N_k : int
+                Total number of lines in k-space.
+            - resp_signal_resampled : np.ndarray
+                Resampled respiration signal.
+            - ecg_signal_resampled : np.ndarray
+                Resampled ECG signal.
     """
+    # Retrieve file paths and parameters from configuration
     TWIX_FILE = config["data"]["twix_file"]
     DICOM_DIR = config["data"]["dicom_folder"]
     RESP_FILE = config["data"].get("resp_file", None)
     ECG_FILES = config["data"].get("ecg_files", [None])
     n_frames = config["data"]["n_frames"]
 
+    # Load scan data and extract k-space information
     scans = di.read_twix_file(TWIX_FILE, include_scans=[-1], parse_pmu=False)
     kspace = di.extract_image_data(scans)
     FRAMERATE, _ = di.get_dicom_framerate(DICOM_DIR)
     N_PHASE_ENCODES_PER_FRAME = kspace.shape[0] // n_frames
+
+    # Display basic scan information
     print(f"Number of frames: {n_frames}")
     print(f"Number of phase encodes per frame: {N_PHASE_ENCODES_PER_FRAME}")
     print(f"Total number of lines in k-space: {kspace.shape[0]}")
+
+    # Compute effective sampling frequency based on DICOM framerate
     fs = FRAMERATE * N_PHASE_ENCODES_PER_FRAME
     print(f"Resp sample rate => fs={fs:.2f} Hz")
 
-    # Resample respiration and ECG signals to match kspace length
+    # Load respiration signal from file
     resp_signal = np.loadtxt(RESP_FILE, skiprows=1, usecols=1)
     # resp_signal = np.loadtxt(RESP_FILE, skiprows=8, usecols=2)
     # resp_signal = signal.resample(resp_signal, int(len(resp_signal) * fs / (1 / 8e-3)))
+
+    # Load ECG signal from file
     ecg_signal = np.loadtxt(ECG_FILES[0], skiprows=1, usecols=1)
     # resp_signal = resp_signal[: len(ecg_signal)]
     N_k = kspace.shape[0]
     print(f"N_k: {N_k}")
 
+    # Resample physiological signals to match k-space length
     resp_signal_resampled = signal.resample(resp_signal, N_k)
     ecg_signal_resampled = signal.resample(ecg_signal, N_k)
     print(f"Resp data resampled length: {len(resp_signal_resampled)}")
@@ -121,25 +136,39 @@ def process_data(config):
 
 def perform_prospective_binning(data, config):
     """
-    Compute prospective respiratory and cardiac fractions and fill the joint k-space bins.
+    Compute prospective respiratory and cardiac fractions and fill the joint
+    k-space bins based on these predictions.
+
+    The function uses predicted respiration and cardiac fractions to assign
+    k-space lines to joint bins. It initializes the prospective fill array and
+    computes a line priority based on a Gaussian weighting.
 
     Parameters
     ----------
     data : dict
-        Data dictionary from process_data().
+        Dictionary returned from process_data().
     config : dict
-        Loaded configuration.
+        Loaded configuration dictionary.
 
     Returns
     -------
     tuple
-        (prospective_fill_joint, acquired_lines, predicted_resp_fraction,
-         predicted_resp_phase, predicted_card_fraction)
+        A tuple containing:
+            - pros_fill_joint : np.ndarray
+                The joint prospective fill array.
+            - acquired_lines : list or np.ndarray
+                List of acquired lines with bin assignments.
+            - predicted_resp_fraction : np.ndarray
+                Predicted respiratory fraction for each line.
+            - predicted_resp_phase : np.ndarray
+                Predicted respiratory phase for each line.
+            - predicted_card_fraction : np.ndarray
+                Predicted cardiac fraction for each line.
     """
     fs = data["fs"]
     N_k = data["N_k"]
 
-    # Predict respiratory and cardiac fractions
+    # Predict respiratory and cardiac fractions using calibration parameters
     predicted_resp_fraction, predicted_resp_phase, _ = rf.predict_fraction(
         data["resp_signal_resampled"],
         fs,
@@ -156,14 +185,14 @@ def perform_prospective_binning(data, config):
     )
     print("Calibration done for respiration and cardiac signals.")
 
-    # Determine bin numbers
+    # Define binning parameters
     USE_TOTAL_BINS = False
     NUM_INHALE_BINS = 3
     NUM_EXHALE_BINS = 1
     num_resp_bins = NUM_INHALE_BINS + NUM_EXHALE_BINS if not USE_TOTAL_BINS else 4
     NUM_CARD_BINS = 20
 
-    # Initialize prospective k-space fill arrays
+    # Initialize the prospective k-space fill array and compute priority map
     KSPACE_H, KSPACE_W = 128, 256
     pros_fill_joint = np.zeros(
         (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
@@ -175,7 +204,7 @@ def perform_prospective_binning(data, config):
         priority_exponent=2.6,
     )
 
-    # Create partial functions for joint bin weight and assignment
+    # Create partial functions for computing joint bin weights and assignments
     get_joint_weights = functools.partial(
         kf.get_joint_bin_weights_gaussian,
         num_inhale_bins=NUM_INHALE_BINS,
@@ -195,7 +224,7 @@ def perform_prospective_binning(data, config):
         num_card_bins=NUM_CARD_BINS,
     )
 
-    # Run the prospective filling loop for joint bins
+    # Run the prospective filling loop to assign k-space lines to bins
     acquired_lines = kf.prospective_fill_loop_joint(
         N=N_k,
         resp_fraction_array=predicted_resp_fraction,
@@ -222,20 +251,43 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
     """
     Compute offline respiratory fractions and perform retrospective k-space filling.
 
-    Also build the 'actual_fill_joint' array, which places ALL lines (k=0..N_k-1)
-    into bins using the same offline fraction logic (no skipping).
-    This represents the real measured data distribution across bins.
+    This function calculates the offline respiratory and cardiac fractions
+    using full signal information and assigns k-space lines to retrospective bins.
+    It also constructs the "actual_fill_joint" array by assigning every k-space line
+    (without skipping) using the same offline logic.
+
+    Parameters
+    ----------
+    data : dict
+        Dictionary returned from process_data().
+    config : dict
+        Loaded configuration dictionary.
+    pros_fill_joint : np.ndarray
+        The prospective fill array from perform_prospective_binning().
+    acquired_lines : list or np.ndarray
+        List of acquired lines with bin assignments from the prospective approach.
 
     Returns
     -------
     tuple
-        (retro_fill_joint, diff_joint, cycles, resp_frac_offline, card_frac_offline,
-         actual_fill_joint)
+        A tuple containing:
+            - retro_fill_joint : np.ndarray
+                The retrospective fill array (only for acquired lines).
+            - diff_joint : np.ndarray
+                The difference between retrospective and prospective fills.
+            - cycles : list
+                Detected respiratory cycles.
+            - resp_frac_offline : np.ndarray
+                Offline respiratory fraction for each k-space line.
+            - card_frac_offline : np.ndarray
+                Offline cardiac fraction for each k-space line.
+            - actual_fill_joint : np.ndarray
+                The fill array that assigns every line (actual measured data).
     """
     fs = data["fs"]
     N_k = data["N_k"]
 
-    # Offline respiration: detect peaks and troughs for full signal
+    # Offline respiration: detect peaks and troughs from the full respiration signal
     resp_peaks_all = rf.detect_resp_peaks(
         data["resp_signal_resampled"], fs, method="scipy", height=0.6, prominence=0.2
     )
@@ -252,12 +304,15 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
     cycles = rf.extract_cycles(all_boundaries, np.array(boundary_labels, dtype=object))
 
     def is_inhale_offline(k, cycles_list):
+        """
+        Determine whether the k-th sample occurs during inhalation based on cycles.
+        """
         for start_idx, end_idx, phase in cycles_list:
             if start_idx <= k < end_idx:
                 return True if phase == "inhalation" else False
         return None
 
-    # Offline cardiac fraction
+    # Offline cardiac fraction calculation using detected R-peaks
     ecg_peaks_all = ecg_resp.detect_r_peaks(data["ecg_signal_resampled"], fs)
     rpeaks_single = ecg_peaks_all[0] if len(ecg_peaks_all) > 0 else np.array([])
     card_frac_offline = np.full(N_k, np.nan)
@@ -275,22 +330,21 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
             frac = 100.0 * (k - last_r) / denom
             card_frac_offline[k] = max(0, min(100, frac))
 
+    # Get the dimensions of the prospective fill array to initialize retrospective arrays
     num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W = pros_fill_joint.shape
     retro_fill_joint = np.zeros(
         (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
     )
-
-    # -------------
-    # NEW array: actual_fill_joint
-    # -------------
+    # Initialize actual fill array to assign all k-space lines
     actual_fill_joint = np.zeros(
         (num_resp_bins, NUM_CARD_BINS, KSPACE_H, KSPACE_W), dtype=float
     )
 
-    # Fill in the retrospective bins (only for lines that prospective approach "acquired")
+    # Fill in the retrospective bins only for lines that were acquired prospectively
     for k in range(N_k):
         if acquired_lines[k] is None:
             continue
+        # Extract the row index from the prospective assignment
         row, _, _ = acquired_lines[k]
         r_frac = resp_frac_offline[k]
         c_frac = card_frac_offline[k]
@@ -309,16 +363,13 @@ def perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lin
         )
         retro_fill_joint[rbin_true, cbin_true, row, :] += 1.0
 
+    # Compute the difference between retrospective and prospective fills
     diff_joint = retro_fill_joint - pros_fill_joint
 
-    # -------------
-    # Fill the actual bins (no skipping). This means we place EVERY line k
-    # into the appropriate bin, using the same offline fraction approach.
-    # row is typically k % KSPACE_H (the i-th line in each "frame" block).
-    # -------------
+    # Fill the actual bins for all k-space lines (without skipping)
     row_offset = config["data"].get("offset", 0)
     for k in range(N_k):
-        # Compute the line index for the actual fill by adding the offset
+        # Calculate the row index within each frame block (with an optional offset)
         row = (k % 48) + row_offset
         r_frac = resp_frac_offline[k]
         c_frac = card_frac_offline[k]
@@ -356,30 +407,48 @@ def visualize_results(
     resp_frac_offline,
     card_frac_offline,
     data,
-    actual_fill_joint,  # NEW argument
+    actual_fill_joint,
 ):
     """
-    Visualize the prospective and retrospective joint k-space filling,
-    and plot separate confusion matrices for cardiac and respiratory bins.
+    Visualize the prospective, retrospective, and actual joint k-space fills,
+    and compute confusion matrices and error metrics for cardiac and respiratory bins.
 
-    Also compute and print:
-      - Joint accuracy (percentage of samples where the prospective joint bin matches the retrospective joint bin)
-      - Accuracy percentages for cardiac and respiratory bins separately
-      - Average bin error (absolute difference between prospective and retrospective assignments)
+    This function produces a series of subplots:
+      - The top four rows display the prospective fill, retrospective fill,
+        difference map, and actual fill for each respiratory bin.
+      - Confusion matrices for both cardiac and respiratory bins are plotted.
+    It also prints accuracy metrics and average bin errors.
+
+    Parameters
+    ----------
+    pros_fill_joint : np.ndarray
+        Prospective joint k-space fill array.
+    retro_fill_joint : np.ndarray
+        Retrospective joint k-space fill array.
+    diff_joint : np.ndarray
+        Difference between retrospective and prospective fills.
+    cycles : list
+        Detected respiratory cycles.
+    acquired_lines : list or np.ndarray
+        List of acquired lines with bin assignments.
+    resp_frac_offline : np.ndarray
+        Offline respiratory fractions for each k-space line.
+    card_frac_offline : np.ndarray
+        Offline cardiac fractions for each k-space line.
+    data : dict
+        Data dictionary from process_data().
+    actual_fill_joint : np.ndarray
+        Joint fill array for actual (all) measured lines.
     """
     num_resp_bins, NUM_CARD_BINS, KSPACE_H, _ = pros_fill_joint.shape
     N_k = data["N_k"]
 
-    # Plot the k-space fill subplots as before, but now we have 4 rows instead of 3:
-    #  [0] Prospective
-    #  [1] Retrospective
-    #  [2] Difference
-    #  [3] Actual
+    # Visualize joint k-space fill for each respiratory bin with 4 rows:
+    # [0] Prospective, [1] Retrospective, [2] Difference, [3] Actual
     for rbin in range(num_resp_bins):
         global_max_pros = np.max(pros_fill_joint[rbin, :, :, :]) or 1.0
         global_max_retro = np.max(retro_fill_joint[rbin, :, :, :]) or 1.0
         global_max_diff = np.max(np.abs(diff_joint[rbin, :, :, :])) or 1.0
-        # We also will scale "actual" by the same standard as prospective for display
         global_max_actual = np.max(actual_fill_joint[rbin, :, :, :]) or 1.0
 
         fig, axs = plt.subplots(
@@ -387,7 +456,9 @@ def visualize_results(
         )
         if NUM_CARD_BINS == 1:
             axs = np.expand_dims(axs, axis=1)
+
         for cbin in range(NUM_CARD_BINS):
+            # Prospective fill subplot
             im0 = axs[0, cbin].imshow(
                 pros_fill_joint[rbin, cbin],
                 cmap="gray",
@@ -399,6 +470,7 @@ def visualize_results(
             axs[0, cbin].axis("off")
             plt.colorbar(im0, ax=axs[0, cbin], fraction=0.046, pad=0.04)
 
+            # Retrospective fill subplot
             im1 = axs[1, cbin].imshow(
                 retro_fill_joint[rbin, cbin],
                 cmap="gray",
@@ -413,6 +485,7 @@ def visualize_results(
             axs[1, cbin].axis("off")
             plt.colorbar(im1, ax=axs[1, cbin], fraction=0.046, pad=0.04)
 
+            # Difference map subplot
             im2 = axs[2, cbin].imshow(
                 diff_joint[rbin, cbin],
                 cmap="bwr",
@@ -429,7 +502,7 @@ def visualize_results(
             axs[2, cbin].axis("off")
             plt.colorbar(im2, ax=axs[2, cbin], fraction=0.046, pad=0.04)
 
-            # NEW: Actual row
+            # Actual fill subplot (for all measured lines)
             im3 = axs[3, cbin].imshow(
                 actual_fill_joint[rbin, cbin],
                 cmap="gray",
@@ -451,7 +524,7 @@ def visualize_results(
         plt.close(fig)
         print(f"Saved subplot figure for respiratory bin {rbin} => {out_png}")
 
-    # Parameters for separate confusion matrices
+    # Define parameters for confusion matrices
     NUM_INHALE_BINS = 3
     NUM_EXHALE_BINS = 1
     USE_TOTAL_BINS = False
@@ -461,35 +534,34 @@ def visualize_results(
     confusion_card = np.zeros((NUM_CARD_BINS, NUM_CARD_BINS), dtype=int)
     confusion_resp = np.zeros((TOTAL_RESP_BINS, TOTAL_RESP_BINS), dtype=int)
 
-    # For joint accuracy (both resp and cardiac match)
+    # Variables to accumulate joint accuracy and error differences
     joint_correct = 0
     joint_total = 0
-
-    # To compute average bin error differences
     total_card_diff = 0
     total_resp_diff = 0
     count_card = 0
     count_resp = 0
 
-    # Helper: determine if sample k is in inhalation phase offline
     def is_inhale_offline(k, cycles_list):
+        """
+        Helper function to determine if sample k is in inhalation phase.
+        """
         for start_idx, end_idx, phase in cycles_list:
             if start_idx <= k < end_idx:
                 return True if phase == "inhalation" else False
         return None
 
-    # Loop over all time steps to fill confusion matrices and accumulate error differences
+    # Loop over each k-space line to build confusion matrices and accumulate errors
     for k in range(N_k):
         if acquired_lines[k] is None:
             continue
-        # Skip if offline fractions are NaN
         if np.isnan(resp_frac_offline[k]) or np.isnan(card_frac_offline[k]):
             continue
 
-        # Prospective assignments from acquired_lines:
+        # Retrieve prospective bin assignment
         _, p_resp_bin, p_card_bin = acquired_lines[k]
 
-        # Joint retrospective assignment using offline fractions:
+        # Compute retrospective joint assignment using offline fractions
         r_rbin, r_cbin = kf.assign_prospective_bin_joint(
             resp_fraction=resp_frac_offline[k],
             resp_is_inhale=is_inhale_offline(k, cycles),
@@ -504,7 +576,7 @@ def visualize_results(
             joint_correct += 1
         joint_total += 1
 
-        # For cardiac: compute retrospective cardiac bin (using simple floor division)
+        # Compute retrospective cardiac bin (using simple floor division)
         bin_width_card = 100.0 / NUM_CARD_BINS
         r_card_bin = int(np.floor(card_frac_offline[k] / bin_width_card))
         r_card_bin = min(r_card_bin, NUM_CARD_BINS - 1)
@@ -512,7 +584,7 @@ def visualize_results(
         total_card_diff += abs(p_card_bin - r_card_bin)
         count_card += 1
 
-        # For respiratory: compute retrospective resp bin using assign_prospective_bin
+        # Compute retrospective respiratory bin using assign_prospective_bin
         r_resp_bin = kf.assign_prospective_bin(
             fraction=resp_frac_offline[k],
             is_inhale=is_inhale_offline(k, cycles),
@@ -525,7 +597,7 @@ def visualize_results(
         total_resp_diff += abs(p_resp_bin - r_resp_bin)
         count_resp += 1
 
-    # Compute accuracies and average errors
+    # Calculate accuracies and average errors
     joint_accuracy = (joint_correct / joint_total * 100) if joint_total > 0 else 0
     total_card = np.sum(confusion_card)
     correct_card = np.trace(confusion_card)
@@ -536,7 +608,7 @@ def visualize_results(
     avg_card_error = total_card_diff / count_card if count_card > 0 else 0
     avg_resp_error = total_resp_diff / count_resp if count_resp > 0 else 0
 
-    # Plot the two confusion matrices as subplots
+    # Plot confusion matrix for cardiac bins
     fig, axs = plt.subplots(1, 2, figsize=(12, 6))
     im1 = axs[0].imshow(confusion_card, origin="upper", cmap="Blues")
     axs[0].set_title("Cardiac Bin Confusion")
@@ -544,6 +616,7 @@ def visualize_results(
     axs[0].set_ylabel("Prospective Cardiac Bin")
     plt.colorbar(im1, ax=axs[0], fraction=0.046, pad=0.04)
 
+    # Plot confusion matrix for respiratory bins
     im2 = axs[1].imshow(confusion_resp, origin="upper", cmap="Blues")
     axs[1].set_title("Respiratory Bin Confusion")
     axs[1].set_xlabel("Retrospective Resp Bin")
@@ -565,23 +638,40 @@ def visualize_results(
 
 
 def main():
+    """
+    Main function to run the joint prospective and retrospective binning analysis.
+
+    Steps:
+        1. Load configuration and process data.
+        2. Perform prospective binning.
+        3. Perform retrospective binning (including actual data fill).
+        4. Visualize results and compute confusion matrices and error metrics.
+        5. Compute and print cost function values for comparison.
+    """
+    # Load configuration and process input data
     config = load_config_file()
     data = process_data(config)
-    pros_fill_joint, acquired_lines, pred_resp_frac, pred_resp_phase, pred_card_frac = (
-        perform_prospective_binning(data, config)
-    )
 
-    # Now do retrospective assignment (and build actual_fill_joint)
+    # Perform prospective binning based on predicted physiological fractions
+    (
+        pros_fill_joint,
+        acquired_lines,
+        pred_resp_frac,
+        pred_resp_phase,
+        pred_card_frac,
+    ) = perform_prospective_binning(data, config)
+
+    # Perform retrospective assignment and construct actual fill array
     (
         retro_fill_joint,
         diff_joint,
         cycles,
         resp_frac_offline,
         card_frac_offline,
-        actual_fill_joint,  # new array
+        actual_fill_joint,
     ) = perform_retrospective_assignment(data, config, pros_fill_joint, acquired_lines)
 
-    # Visualize, passing in actual_fill_joint
+    # Visualize the joint k-space fills and confusion matrices
     visualize_results(
         pros_fill_joint,
         retro_fill_joint,
@@ -594,9 +684,7 @@ def main():
         actual_fill_joint,
     )
 
-    # -------------
-    # Finally, compute cost function for each scenario, just for comparison
-    # -------------
+    # Compute cost function for each binning scenario for comparison
     cost_pros = compute_cost_on_retro_fill(pros_fill_joint, center_size=20, desired=3.0)
     cost_retro = compute_cost_on_retro_fill(
         retro_fill_joint, center_size=20, desired=3.0
