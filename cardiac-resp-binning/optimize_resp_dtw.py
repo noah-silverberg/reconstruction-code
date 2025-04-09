@@ -1,64 +1,37 @@
 import yaml
 import numpy as np
 import matplotlib.pyplot as plt
-from IPython.display import display
+import seaborn as sns
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import itertools
+from tqdm import tqdm
+from scipy.ndimage import gaussian_filter1d
+import scipy.signal as signal
+
 import utils.data_ingestion as di
 import utils.ecg_resp as ecg_resp
-import scipy.signal as signal
-import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
-import matplotlib.cm as cm
-from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter1d
 
-# %matplotlib widget
+from tslearn.backend import instantiate_backend
+from tslearn.utils import to_time_series
+from numba import njit
+
+# -------------------------------------------------------------
+# Utility: load YAML config
+# -------------------------------------------------------------
 
 
 def load_config(config_file="config.yaml"):
-    """
-    Load configuration from a YAML file.
-
-    Parameters
-    ----------
-    config_file : str
-        Path to the YAML configuration file.
-
-    Returns
-    -------
-    dict
-        Parsed configuration.
-    """
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
 
 
-from tslearn.backend import instantiate_backend
-from tslearn.utils import to_time_series
-import numpy
-from numba import njit
+# -------------------------------------------------------------
+#  Low‑level DTW helpers (unchanged phase logic)
+# -------------------------------------------------------------
 
 
 @njit()
 def _njit_subsequence_path(acc_cost_mat, idx_path_end):
-    r"""Compute the optimal path through an accumulated cost matrix given the
-    endpoint of the sequence.
-
-    Parameters
-    ----------
-    acc_cost_mat: array-like, shape=(sz1, sz2)
-        Accumulated cost matrix comparing subsequence from a longer sequence.
-    idx_path_end: int
-        The end position of the matched subsequence in the longer sequence.
-
-    Returns
-    -------
-    path: list of tuples of integer pairs
-        Matching path represented as a list of index pairs. In each pair, the
-        first index corresponds to `subseq` and the second one corresponds to
-        `longseq`. The startpoint of the Path is :math:`P_0 = (0, ?)` and it
-        ends at :math:`P_L = (len(subseq)-1, idx\_path\_end)`
-    """
     sz1, sz2 = acc_cost_mat.shape
     path = [(sz1 - 1, idx_path_end)]
     while path[-1][0] != 0:
@@ -68,14 +41,14 @@ def _njit_subsequence_path(acc_cost_mat, idx_path_end):
         elif j == 0:
             path.append((i - 1, 0))
         else:
-            arr = numpy.array(
+            arr = np.array(
                 [
-                    acc_cost_mat[i - 1][j - 1],
-                    acc_cost_mat[i - 1][j],
-                    acc_cost_mat[i][j - 1],
+                    acc_cost_mat[i - 1, j - 1],
+                    acc_cost_mat[i - 1, j],
+                    acc_cost_mat[i, j - 1],
                 ]
             )
-            argmin = numpy.argmin(arr)
+            argmin = np.argmin(arr)
             if argmin == 0:
                 path.append((i - 1, j - 1))
             elif argmin == 1:
@@ -86,217 +59,207 @@ def _njit_subsequence_path(acc_cost_mat, idx_path_end):
 
 
 @njit()
-def _njit_local_squared_dist(x, y):
-    """Compute the squared distance between two vectors.
-
-    Parameters
-    ----------
-    x : array-like, shape=(d,)
-        A vector.
-    y : array-like, shape=(d,)
-        Another vector.
-
-    Returns
-    -------
-    dist : float
-        Squared distance between x and y.
-    """
-    dist = 0.0
-    for di in range(x.shape[0]):
-        diff = x[di] - y[di]
-        dist += diff * diff
-    return dist
-
-
-@njit()
 def _njit_local_custom_dist(x, y, alpha=1.0):
-    """Compute the distance between two vectors.
-
-    Parameters
-    ----------
-    x : array-like, shape=(d,)
-        A vector.
-    y : array-like, shape=(d,)
-        Another vector.
-
-    Returns
-    -------
-    dist : float
-        Squared distance between x and y.
-    """
-    dist = 0.0
+    d = 0.0
     for di in range(x.shape[0]):
         diff = x[di] - y[di]
-        dist += diff**alpha
-    return dist
+        d += diff**alpha
+    return d
 
 
 @njit()
 def _njit_subsequence_cost_matrix(subseq, longseq, warp_penalty=0.0, alpha=1.0):
-    """Compute the accumulated cost matrix score between a subsequence and
-    a reference time series.
-
-    Parameters
-    ----------
-    subseq : array-like, shape=(sz1, d)
-        Subsequence time series.
-    longseq : array-like, shape=(sz2, d)
-        Reference time series.
-
-    Returns
-    -------
-    mat : array-like, shape=(sz1, sz2)
-        Accumulated cost matrix.
-    """
-    l1 = subseq.shape[0]
-    l2 = longseq.shape[0]
-    cum_sum = numpy.full((l1 + 1, l2 + 1), numpy.inf)
-    cum_sum[0, :] = 0.0
-
+    l1, l2 = subseq.shape[0], longseq.shape[0]
+    cum = np.full((l1 + 1, l2 + 1), np.inf)
+    cum[0, :] = 0.0
     for i in range(l1):
         for j in range(l2):
-            d = _njit_local_custom_dist(subseq[i], longseq[j], alpha=alpha)
-            diag = cum_sum[i, j]
-            vert = cum_sum[i, j + 1] + warp_penalty
-            hori = cum_sum[i + 1, j] + warp_penalty
-            cum_sum[i + 1, j + 1] = d + min(diag, vert, hori)
-    return cum_sum[1:, 1:]
+            d = _njit_local_custom_dist(subseq[i], longseq[j], alpha)
+            diag = cum[i, j]
+            vert = cum[i, j + 1] + warp_penalty
+            hori = cum[i + 1, j] + warp_penalty
+            cum[i + 1, j + 1] = d + min(diag, vert, hori)
+    return cum[1:, 1:]
 
 
-def m_dtw_subsequence_path(subseq, longseq, be=None, warp_penalty=0.0, alpha=1.0):
-    r"""Compute sub-sequence Dynamic Time Warping (DTW) similarity measure
-    between a (possibly multidimensional) query and a long time series and
-    return both the path and the similarity.
-
-    DTW is computed as the Euclidean distance between aligned time series,
-    i.e., if :math:`\pi` is the alignment path:
-
-    .. math::
-
-        DTW(X, Y) = \sqrt{\sum_{(i, j) \in \pi} \|X_{i} - Y_{j}\|^2}
-
-    Compared to traditional DTW, here, border constraints on admissible paths
-    :math:`\pi` are relaxed such that :math:`\pi_0 = (0, ?)` and
-    :math:`\pi_L = (N-1, ?)` where :math:`L` is the length of the considered
-    path and :math:`N` is the length of the subsequence time series.
-
-    It is not required that both time series share the same size, but they must
-    be the same dimension. This implementation finds the best matching starting
-    and ending positions for `subseq` inside `longseq`.
-
-    Parameters
-    ----------
-    subseq : array-like, shape=(sz1, d) or (sz1,)
-        A query time series.
-        If shape is (sz1,), the time series is assumed to be univariate.
-    longseq : array-like, shape=(sz2, d) or (sz2,)
-        A reference (supposed to be longer than `subseq`) time series.
-        If shape is (sz2,), the time series is assumed to be univariate.
-    be : Backend object or string or None
-        Backend. If `be` is an instance of the class `NumPyBackend` or the string `"numpy"`,
-        the NumPy backend is used.
-        If `be` is an instance of the class `PyTorchBackend` or the string `"pytorch"`,
-        the PyTorch backend is used.
-        If `be` is `None`, the backend is determined by the input arrays.
-        See our :ref:`dedicated user-guide page <backend>` for more information.
-
-    Returns
-    -------
-    list of integer pairs
-        Matching path represented as a list of index pairs. In each pair, the
-        first index corresponds to `subseq` and the second one corresponds to
-        `longseq`.
-    float
-        Similarity score
-    """
+def m_dtw_subsequence_path(subseq, longseq, warp_penalty=0.0, alpha=1.0, be=None):
     be = instantiate_backend(be, subseq, longseq)
     subseq = to_time_series(subseq, be=be)
     longseq = to_time_series(longseq, be=be)
-    acc_cost_mat = _njit_subsequence_cost_matrix(
-        subseq=subseq, longseq=longseq, warp_penalty=warp_penalty, alpha=alpha
-    )
-    global_optimal_match = be.argmin(acc_cost_mat[-1, :])
-    path = _njit_subsequence_path(acc_cost_mat, global_optimal_match)
-    return path, be.sqrt(acc_cost_mat[-1, :][global_optimal_match])
+    acc = _njit_subsequence_cost_matrix(subseq, longseq, warp_penalty, alpha)
+    j_best = be.argmin(acc[-1, :])
+    path = _njit_subsequence_path(acc, j_best)
+    return path, acc[-1, j_best]
 
 
-# Read config
-config = load_config()
+# -------------------------------------------------------------
+#   Ground‑truth phase 0 → 1 → 0 using trough/peak indices
+# -------------------------------------------------------------
 
-# Paths and optional file references
-twix_file = config["data"]["twix_file"]
-dicom_folder = config["data"]["dicom_folder"]
-resp_file = config["data"].get("resp_file", None)
 
-# Read TWIX, extract raw k-space, and derive sampling frequency
-scans = di.read_twix_file(twix_file, include_scans=[-1], parse_pmu=False)
+def ground_truth_phase(n_samples, peaks, troughs):
+    """Return array of shape (n_samples,) with NaN outside cycles."""
+    peaks = np.asarray(peaks, dtype=int)
+    troughs = np.asarray(troughs, dtype=int)
+    extrema = np.sort(np.concatenate((peaks, troughs)))
+    valid = (extrema > 0) & (extrema < n_samples - 1)
+    extrema = extrema[valid]
+    phase = np.full(n_samples, np.nan, dtype=float)
+    for i in range(len(extrema) - 1):
+        s, e = extrema[i], extrema[i + 1]
+        if s in troughs and e in peaks:
+            phase[s:e] = np.linspace(0, 1, e - s, endpoint=False)
+        elif s in peaks and e in troughs:
+            phase[s:e] = np.linspace(1, 0, e - s, endpoint=False)
+    return phase
 
-kspace = di.extract_image_data(scans)
 
-framerate, frametime = di.get_dicom_framerate(dicom_folder)
-n_phase_encodes_per_frame = kspace.shape[0] // config["data"]["n_frames"]
-fs = framerate * n_phase_encodes_per_frame  # ECG / respiration sampling freq
+# -------------------------------------------------------------
+#   Parameter scoring (keeps existing percentage logic)
+# -------------------------------------------------------------
 
-# Load and detect peaks/troughs
-resp_data = np.loadtxt(resp_file, skiprows=1, usecols=1)
-# Resample to match the total number of k-space time points
-resp_data = signal.resample(resp_data, kspace.shape[0])[:, np.newaxis]
 
-resp_peaks = ecg_resp.detect_resp_peaks(
-    resp_data, fs, method="scipy", height=0.6, prominence=0.15
-)
-resp_troughs = ecg_resp.detect_resp_peaks(
-    -resp_data, fs, method="scipy", height=0.6, prominence=0.15
-)
-
-# Assume resp_data is your (N, 1) ndarray:
-resp_data = resp_data.flatten()
-
-# Define two full respiratory cycles as the template
-cycle1_start, cycle1_end = 817, 1853
-cycle2_start, cycle2_end = 1853, 2719
-
-template = resp_data[cycle1_start:cycle2_end]  # Two full cycles
-template = gaussian_filter1d(template, sigma=10)
-template_norm = (template - np.min(template)) / (np.max(template) - np.min(template))
-
-# Normalize the full respiratory signal
-resp_data_norm = (resp_data - np.min(resp_data)) / (
-    np.max(resp_data) - np.min(resp_data)
-)
-
-# Parameters
-window_size = (cycle2_end - cycle1_start) // 2  # Length of one full cycle
-
-# Store estimated phase at each time step
-phases = np.full_like(resp_data_norm, np.nan, dtype=float)
-
-# Loop through the signal in real-time fashion
-for t in tqdm(range(window_size, len(resp_data_norm))):
-    current_data = resp_data_norm[: t + 1]
-    current_data = (current_data - np.min(current_data)) / (
-        np.max(current_data) - np.min(current_data)
-    )
-    current_window = current_data[
-        t - window_size + 1 :
-    ]  # Most recent full cycle window
-    current_window = gaussian_filter1d(current_window, sigma=10)
-
-    # Subsequence DTW: match recent window to the 2-cycle template
-    path, _ = m_dtw_subsequence_path(current_window, template_norm, warp_penalty=1)
-    window_indices, template_indices = zip(*path)
-
-    # Find where the last sample of the current window (i.e., t) aligns in the template
-    if window_size - 1 in window_indices:
-        idx_in_path = window_indices.index(window_size - 1)
-        matched_template_index = template_indices[idx_in_path]
-
-        # --- Phase calculation for two‑cycle template ---
-        cycle_len = cycle1_end - cycle1_start  # assume both cycles equal length
+def score_params(arg_tuple):
+    (
+        warp_penalty,
+        alpha,
+        resp_norm,
+        template_norm,
+        cycle_len,
+        window_size,
+        peaks,
+        troughs,
+    ) = arg_tuple
+    phases_est = np.full_like(resp_norm, np.nan, dtype=float)
+    for t in range(window_size, len(resp_norm)):
+        window = resp_norm[t - window_size + 1 : t + 1]
+        window = gaussian_filter1d(window, sigma=10)
+        path, _ = m_dtw_subsequence_path(window, template_norm, warp_penalty, alpha)
+        if len(path) == 0:
+            continue
+        win_idx, temp_idx = zip(*path)
+        if window_size - 1 not in win_idx:
+            continue
+        matched_template_index = temp_idx[win_idx.index(window_size - 1)]
         if matched_template_index < cycle_len:
-            # first cycle
-            phase_percent = matched_template_index / cycle_len
+            phase = matched_template_index / cycle_len  # rise 0→1 (trough→peak)
         else:
-            # second cycle
-            phase_percent = (matched_template_index - cycle_len) / cycle_len
-        phases[t] = phase_percent
+            phase = (
+                1 - (matched_template_index - cycle_len) / cycle_len
+            )  # fall 1→0 (peak→trough)
+        phases_est[t] = phase
+    phases_gt = ground_truth_phase(len(resp_norm), peaks, troughs)
+    valid = ~np.isnan(phases_gt) & ~np.isnan(phases_est)
+    mae = (
+        np.mean(np.abs(phases_est[valid] - phases_gt[valid])) if valid.any() else np.inf
+    )
+    return warp_penalty, alpha, mae, phases_est
+
+
+# -------------------------------------------------------------
+#   Main
+# -------------------------------------------------------------
+
+if __name__ == "__main__":
+    cfg = load_config()
+    twix_file = cfg["data"]["twix_file"]
+    dicom_folder = cfg["data"]["dicom_folder"]
+    resp_file = cfg["data"]["resp_file"]
+
+    # read data & sampling rate
+    scans = di.read_twix_file(twix_file, include_scans=[-1], parse_pmu=False)
+    kspace = di.extract_image_data(scans)
+    fr, _ = di.get_dicom_framerate(dicom_folder)
+    fs = fr * (kspace.shape[0] // cfg["data"]["n_frames"])
+
+    resp = np.loadtxt(resp_file, skiprows=1, usecols=1)
+    resp = signal.resample(resp, kspace.shape[0])[:, np.newaxis]
+
+    # detect extrema
+    peaks_global = ecg_resp.detect_resp_peaks(
+        resp, fs, method="scipy", height=0.6, prominence=0.15
+    )
+    troughs_global = ecg_resp.detect_resp_peaks(
+        -resp, fs, method="scipy", height=0.6, prominence=0.15
+    )
+
+    resp = resp.flatten()
+
+    # build template (two cycles hard‑coded indices)
+    cycle1_start, cycle1_end = 817, 1853
+    cycle2_end = 2719
+    template = gaussian_filter1d(resp[cycle1_start:cycle2_end], sigma=10)
+    template_norm = (template - template.min()) / (template.max() - template.min())
+
+    resp_norm = (resp - resp.min()) / (resp.max() - resp.min())
+
+    cycle_len = cycle1_end - cycle1_start
+    window_size = cycle_len  # one full cycle
+
+    # ----- parameter grid -----
+    warp_penalties = np.array([1.0])
+    alphas = np.array([2.0])
+    grid = list(itertools.product(warp_penalties, alphas))
+
+    print(f"Evaluating {len(grid)} parameter combinations …")
+
+    args_iter = [
+        (
+            wp,
+            a,
+            resp_norm,
+            template_norm,
+            cycle_len,
+            window_size,
+            peaks_global,
+            troughs_global,
+        )
+        for wp, a in grid
+    ]
+
+    results = []
+    with ProcessPoolExecutor() as ex:
+        futs = [ex.submit(score_params, arg) for arg in args_iter]
+        for f in as_completed(futs):
+            results.append(f.result())
+            print(f"completed {len(results)}/{len(grid)}")
+
+    # reshape into matrix for heatmap
+    score_mat = np.full((len(warp_penalties), len(alphas)), np.nan)
+    for wp, a, mae, _ in results:
+        i = np.where(np.isclose(warp_penalties, wp))[0][0]
+        j = np.where(np.isclose(alphas, a))[0][0]
+        score_mat[i, j] = mae
+
+    plt.figure(figsize=(7, 5))
+    sns.heatmap(
+        score_mat,
+        annot=True,
+        fmt=".3f",
+        xticklabels=np.round(alphas, 2),
+        yticklabels=np.round(warp_penalties, 2),
+    )
+    plt.xlabel("alpha")
+    plt.ylabel("warp_penalty")
+    plt.title("MAE between estimated phase and ground truth (0→1→0)")
+    plt.tight_layout()
+    plt.savefig("grid_mae_heatmap.png", dpi=200)
+    plt.show()
+
+    # plot best three
+    best = sorted(results, key=lambda x: x[2])[:3]
+    gt = ground_truth_phase(len(resp_norm), peaks_global, troughs_global)
+    fig, axes = plt.subplots(len(best), 1, figsize=(12, 4 * len(best)))
+    if len(best) == 1:
+        axes = [axes]
+    for ax, (wp, a, mae, ph_est) in zip(axes, best):
+        ax.plot(resp_norm, label="Resp signal", alpha=0.4)
+        ax.plot(gt, label="Ground truth", linestyle="--")
+        ax.plot(ph_est, label=f"Est (wp={wp:.2f}, a={a:.2f}, MAE={mae:.3f})")
+        ax.set_ylabel("Phase / Amplitude")
+        ax.legend()
+        ax.legend()
+    axes[-1].set_xlabel("Samples")
+    plt.tight_layout()
+    plt.savefig("top3_phase_traces.png", dpi=200)
+    plt.show()
