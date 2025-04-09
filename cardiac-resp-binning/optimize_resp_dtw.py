@@ -63,7 +63,7 @@ def _njit_local_custom_dist(x, y, alpha=1.0):
     d = 0.0
     for di in range(x.shape[0]):
         diff = x[di] - y[di]
-        d += diff**alpha
+        d += np.abs(diff) ** alpha
     return d
 
 
@@ -125,7 +125,6 @@ def score_params(arg_tuple):
         alpha,
         resp_norm,
         template_norm,
-        cycle_len,
         window_size,
         peaks,
         troughs,
@@ -141,12 +140,27 @@ def score_params(arg_tuple):
         if window_size - 1 not in win_idx:
             continue
         matched_template_index = temp_idx[win_idx.index(window_size - 1)]
-        if matched_template_index < cycle_len:
-            phase = matched_template_index / cycle_len  # rise 0→1 (trough→peak)
+
+        # pre‑compute template extrema helpers
+        extrema_sorted = np.sort(np.concatenate((peaks, troughs)))
+
+        # Get the phase
+        prev_idx = extrema_sorted[extrema_sorted < matched_template_index]
+        next_idx = extrema_sorted[extrema_sorted > matched_template_index]
+        if len(prev_idx) == 0 or len(next_idx) == 0:
+            continue
+        prev_idx = prev_idx[-1]
+        next_idx = next_idx[0]
+        if prev_idx in peaks and next_idx in troughs:
+            # peak -> trough
+            phase = 1 - (matched_template_index - prev_idx) / (next_idx - prev_idx)
+        elif prev_idx in troughs and next_idx in peaks:
+            # trough -> peak
+            phase = (matched_template_index - prev_idx) / (next_idx - prev_idx)
         else:
-            phase = (
-                1 - (matched_template_index - cycle_len) / cycle_len
-            )  # fall 1→0 (peak→trough)
+            # should not happen
+            phase = np.nan
+
         phases_est[t] = phase
     phases_gt = ground_truth_phase(len(resp_norm), peaks, troughs)
     valid = ~np.isnan(phases_gt) & ~np.isnan(phases_est)
@@ -186,19 +200,21 @@ if __name__ == "__main__":
     resp = resp.flatten()
 
     # build template (two cycles hard‑coded indices)
-    cycle1_start, cycle1_end = 817, 1853
-    cycle2_end = 2719
+    cycle1_start, cycle1_end = peaks_global[0], peaks_global[1]
+    cycle2_end = peaks_global[2]
     template = gaussian_filter1d(resp[cycle1_start:cycle2_end], sigma=10)
     template_norm = (template - template.min()) / (template.max() - template.min())
 
     resp_norm = (resp - resp.min()) / (resp.max() - resp.min())
 
     cycle_len = cycle1_end - cycle1_start
-    window_size = cycle_len  # one full cycle
+    window_size = cycle_len / 2  # one full cycle
 
     # ----- parameter grid -----
-    warp_penalties = np.array([1.0])
-    alphas = np.array([2.0])
+    # warp_penalties = np.arange(0.0, 2.0, 0.2)
+    # alphas = np.arange(0.8, 10.0, 0.4)
+    warp_penalties = np.arange(0.00, 0.16, 0.04)
+    alphas = np.array([0.5, 2])
     grid = list(itertools.product(warp_penalties, alphas))
 
     print(f"Evaluating {len(grid)} parameter combinations …")
@@ -210,7 +226,6 @@ if __name__ == "__main__":
             resp_norm,
             template_norm,
             cycle_len,
-            window_size,
             peaks_global,
             troughs_global,
         )
