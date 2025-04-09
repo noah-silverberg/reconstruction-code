@@ -167,7 +167,17 @@ def score_params(arg_tuple):
     mae = (
         np.mean(np.abs(phases_est[valid] - phases_gt[valid])) if valid.any() else np.inf
     )
-    return warp_penalty, alpha, mae, phases_est
+    mse = (
+        np.mean((phases_est[valid] - phases_gt[valid]) ** 2) if valid.any() else np.inf
+    )
+    cust_err = (
+        np.mean(np.abs(phases_est[valid] - phases_gt[valid]) ** 8)
+        if valid.any()
+        else np.inf
+    )
+    print(f"wp={warp_penalty:.2f}, alpha={alpha:.2f}")
+    print(f"MAE={mae:.3f}, MSE={mse:.3f}, CustErr={cust_err:.3f}\n")
+    return warp_penalty, alpha, mae, mse, cust_err, phases_est
 
 
 # -------------------------------------------------------------
@@ -213,8 +223,8 @@ if __name__ == "__main__":
     # ----- parameter grid -----
     # warp_penalties = np.arange(0.0, 2.0, 0.2)
     # alphas = np.arange(0.8, 10.0, 0.4)
-    warp_penalties = np.arange(0.00, 0.16, 0.04)
-    alphas = np.array([0.5, 2])
+    warp_penalties = np.array([0.00, 0.04, 1.0, 2.0])
+    alphas = np.array([2, 4, 8, 12, 16])
     grid = list(itertools.product(warp_penalties, alphas))
 
     print(f"Evaluating {len(grid)} parameter combinations …")
@@ -241,10 +251,10 @@ if __name__ == "__main__":
 
     # reshape into matrix for heatmap
     score_mat = np.full((len(warp_penalties), len(alphas)), np.nan)
-    for wp, a, mae, _ in results:
+    for wp, a, mae, mse, cust_err, _ in results:
         i = np.where(np.isclose(warp_penalties, wp))[0][0]
         j = np.where(np.isclose(alphas, a))[0][0]
-        score_mat[i, j] = mae
+        score_mat[i, j] = cust_err
 
     plt.figure(figsize=(7, 5))
     sns.heatmap(
@@ -256,7 +266,7 @@ if __name__ == "__main__":
     )
     plt.xlabel("alpha")
     plt.ylabel("warp_penalty")
-    plt.title("MAE between estimated phase and ground truth (0→1→0)")
+    plt.title("Custom Error between estimated phase and ground truth (0→1→0)")
     plt.tight_layout()
     plt.savefig("grid_mae_heatmap.png", dpi=200)
     plt.show()
@@ -267,10 +277,10 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(len(best), 1, figsize=(12, 4 * len(best)))
     if len(best) == 1:
         axes = [axes]
-    for ax, (wp, a, mae, ph_est) in zip(axes, best):
+    for ax, (wp, a, mae, mse, cust_err, ph_est) in zip(axes, best):
         ax.plot(resp_norm, label="Resp signal", alpha=0.4)
         ax.plot(gt, label="Ground truth", linestyle="--")
-        ax.plot(ph_est, label=f"Est (wp={wp:.2f}, a={a:.2f}, MAE={mae:.3f})")
+        ax.plot(ph_est, label=f"Est (wp={wp:.2f}, a={a:.2f}, Cust Err={cust_err:.3f})")
         ax.set_ylabel("Phase / Amplitude")
         ax.legend()
         ax.legend()
