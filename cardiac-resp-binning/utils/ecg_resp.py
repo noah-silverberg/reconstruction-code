@@ -219,7 +219,7 @@ def plot_ecg_signals(
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Amplitude")
             ax.set_title(channel_labels[i])
-            ax.legend()
+            ax.legend(loc="lower right")
         plt.tight_layout()
 
     elif mode == "together":

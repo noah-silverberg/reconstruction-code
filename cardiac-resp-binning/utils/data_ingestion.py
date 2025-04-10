@@ -45,16 +45,19 @@ def get_dicom_framerate(folder_path):
     ds = dicoms[0]
     # Try FrameTime (0018,1062)
     if hasattr(ds, "FrameTime"):
+        print("Using FrameTime")
         frame_time = float(ds.FrameTime) / 1000.0  # convert ms to s
         return 1.0 / frame_time, frame_time
 
     # Try CineRate (0018,0040)
     if hasattr(ds, "CineRate"):
+        print("Using CineRate")
         frate = float(ds.CineRate)
         return frate, 1.0 / frate
 
     # Fallback: use differences in AcquisitionTime across slices
     if hasattr(ds, "AcquisitionTime"):
+        print("Using AcquisitionTime")
 
         def time_to_seconds(t):
             return int(t[:2]) * 3600 + int(t[2:4]) * 60 + float(t[4:])
@@ -62,9 +65,10 @@ def get_dicom_framerate(folder_path):
         times = [time_to_seconds(d.AcquisitionTime) for d in dicoms]
         diffs = np.diff(times)
         if len(diffs) > 0:
-            avg_diff = np.mean(diffs)
-            if avg_diff != 0:
-                return 1.0 / avg_diff, avg_diff
+            # Calculate the median of the differences
+            median_diff = np.median(diffs)
+            if median_diff != 0:
+                return 1.0 / median_diff, median_diff
     return None, None
 
 
