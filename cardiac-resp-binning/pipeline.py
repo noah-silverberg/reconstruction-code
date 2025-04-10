@@ -43,21 +43,39 @@ def run_pipeline(config):
     # Read TWIX data
     twix_data = di.read_twix_file(twix_file, include_scans=[-1], parse_pmu=False)
     kspace = di.extract_image_data(twix_data)
+    n_phase_encodes_per_frame = kspace.shape[0] // n_frames
 
     # Determine sampling frequency
-    framerate, frame_time = di.get_dicom_framerate(dicom_folder)
-    n_phase_encodes_per_frame = kspace.shape[0] // n_frames
-    fs = framerate * n_phase_encodes_per_frame
-
-    print(
-        f"Frame rate: {framerate:.2f} Hz, Frame time: {frame_time:.4f} s, fs: {fs:.2f}"
-    )
+    fs_method = config["processing"].get("sampling_rate", "twix")
+    if fs_method == "twix":
+        fs = 1 / (twix_data[-1]["hdr"]["Phoenix"]["alTR"][0] * 1e-6)
+        print(f"Sampling frequency from TWIX: {fs:.2f} Hz")
+    elif fs_method == "dicom":
+        framerate, frame_time = di.get_dicom_framerate(dicom_folder)
+        fs = framerate * n_phase_encodes_per_frame
+        print(
+            f"DICOM: Frame rate: {framerate:.2f} Hz, Frame time: {frame_time:.4f} s, fs: {fs:.2f}"
+        )
+    else:
+        raise ValueError(f"Unsupported sampling frequency method: {fs_method}")
 
     # --- ECG / R-peak detection from events file ---
     print("Processing ECG data (R-peak detection)...")
-    events_file = config["data"]["event_file"]
-    events = ecg_resp.load_and_resample_events(events_file, kspace.shape[0])
-    r_peaks = np.nonzero(events)[0]
+    events_file = config["data"].get("event_file", None)
+    if events_file is None:
+        ecg_columns = config["data"].get("ecg_columns", None)
+        ecg_data = di.extract_iceparam_data(
+            twix_data,
+            segment_index=0,
+            columns=np.s_[
+                int(ecg_columns.split(":")[0]) : int(ecg_columns.split(":")[1])
+            ],
+        )
+        r_peaks_list = ecg_resp.detect_r_peaks(ecg_data, fs)
+        r_peaks = np.mean(r_peaks_list, axis=0).astype(int)
+    else:
+        events = ecg_resp.load_and_resample_events(events_file, kspace.shape[0])
+        r_peaks = np.nonzero(events)[0]
 
     # Basic heart rate estimation from R-peaks
     heart_rate = ecg_resp.compute_average_heart_rate([r_peaks], fs)
@@ -65,7 +83,17 @@ def run_pipeline(config):
 
     # --- Respiratory data & binning approach ---
     print("Processing Resp data (peak detection)...")
-    resp_file = config["data"]["resp_file"]
+    resp_file = config["data"].get("resp_file", None)
+    if resp_file is None:
+        resp_column = config["data"].get("resp_column", None)
+        resp_data = di.extract_iceparam_data(
+            twix_data,
+            segment_index=0,
+            columns=np.s_[int(resp_column)],
+        )[:, np.newaxis]
+    else:
+        resp_data = ecg_resp.load_and_resample_resp(resp_file, kspace.shape[0])
+
     resp_bin_method = config["processing"].get(
         "resp_bin_method", "even"
     )  # "even" or "physio"
@@ -89,7 +117,6 @@ def run_pipeline(config):
             resp_trough_height = resp_trough_kwargs["height"]
             resp_trough_prominence = resp_trough_kwargs["prominence"]
 
-    resp_data = ecg_resp.load_and_resample_resp(resp_file, kspace.shape[0])
     resp_peaks = ecg_resp.detect_resp_peaks(
         resp_data,
         fs,
